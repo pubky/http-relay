@@ -21,6 +21,7 @@ use axum::{
 
 use super::response::{await_consumer_message, await_producer_completion, build_response};
 use super::waiting_list::{LimitError, Message};
+use super::server::Config;
 use super::AppState;
 
 /// Maximum allowed length for channel IDs (in bytes).
@@ -28,30 +29,29 @@ use super::AppState;
 const MAX_CHANNEL_ID_LENGTH: usize = 256;
 
 /// Configuration for link handler behavior.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct LinkConfig {
     /// Whether to use caching for this endpoint.
     pub caching_enabled: bool,
+    /// Timeout for requests on this endpoint.
+    pub timeout: Duration,
 }
 
 impl LinkConfig {
     /// Standard link endpoint without caching.
-    pub const STANDARD: Self = Self {
-        caching_enabled: false,
-    };
+    pub fn standard(config: &Config) -> Self {
+        Self {
+            caching_enabled: false,
+            timeout: config.request_timeout,
+        }
+    }
 
     /// Link2 endpoint with caching enabled.
-    pub const WITH_CACHE: Self = Self {
-        caching_enabled: true,
-    };
-}
-
-/// Returns the timeout duration based on link config.
-fn get_timeout(state: &AppState, config: LinkConfig) -> Duration {
-    if config.caching_enabled {
-        state.config.link2_timeout
-    } else {
-        state.config.request_timeout
+    pub fn with_cache(config: &Config) -> Self {
+        Self {
+            caching_enabled: true,
+            timeout: config.link2_timeout,
+        }
     }
 }
 
@@ -67,7 +67,6 @@ pub async fn get_handler(
 
     let mut pending_list = state.pending_list.lock().await;
 
-    // Check cache if caching is enabled
     if config.caching_enabled {
         if let Some(cached) = pending_list.get_cached(&id) {
             return build_response(StatusCode::OK, cached.body, cached.content_type);
@@ -75,7 +74,6 @@ pub async fn get_handler(
     }
 
     if let Some(producer) = pending_list.remove_producer(&id) {
-        // Cache the response if caching is enabled
         if config.caching_enabled {
             pending_list.insert_cached(
                 &id,
@@ -88,7 +86,6 @@ pub async fn get_handler(
         return build_response(StatusCode::OK, producer.body, producer.content_type);
     };
 
-    // No producer ready. Insert consumer into pending list and wait.
     let receiver = match pending_list.insert_consumer(&id) {
         Ok(r) => r,
         Err(LimitError::PendingLimitReached) => {
@@ -101,9 +98,8 @@ pub async fn get_handler(
     };
     drop(pending_list);
 
-    let timeout = get_timeout(&state, config);
     let pending_list = state.pending_list.clone();
-    await_consumer_message(receiver, timeout, || async move {
+    await_consumer_message(receiver, config.timeout, || async move {
         pending_list.lock().await.remove_consumer(&id);
     })
     .await
@@ -128,13 +124,11 @@ pub async fn post_handler(
 
     let mut pending_list = state.pending_list.lock().await;
 
-    // Invalidate cache if caching is enabled
     if config.caching_enabled {
         pending_list.remove_cached(&channel);
     }
 
     if let Some(consumer) = pending_list.remove_consumer(&channel) {
-        // Cache the response if caching is enabled
         if config.caching_enabled {
             pending_list.insert_cached(
                 &channel,
@@ -148,7 +142,6 @@ pub async fn post_handler(
         return (StatusCode::OK, Bytes::new());
     };
 
-    // No consumer ready. Insert producer into pending list and wait.
     let receiver = match pending_list.insert_producer(&channel, body, content_type) {
         Ok(r) => r,
         Err(LimitError::PendingLimitReached) => {
@@ -160,47 +153,48 @@ pub async fn post_handler(
     };
     drop(pending_list);
 
-    let timeout = get_timeout(&state, config);
     let pending_list = state.pending_list.clone();
-    await_producer_completion(receiver, timeout, || async move {
+    await_producer_completion(receiver, config.timeout, || async move {
         pending_list.lock().await.remove_producer(&channel);
     })
     .await
 }
 
-// Thin wrapper handlers for the /link/ endpoint (no caching)
 pub mod link {
     use super::*;
 
-    pub async fn get_handler(path: Path<String>, state: State<AppState>) -> Response {
-        super::get_handler(path, state, LinkConfig::STANDARD).await
+    pub async fn get_handler(path: Path<String>, State(state): State<AppState>) -> Response {
+        let config = LinkConfig::standard(&state.config);
+        super::get_handler(path, State(state), config).await
     }
 
     pub async fn post_handler(
         path: Path<String>,
-        state: State<AppState>,
+        State(state): State<AppState>,
         headers: HeaderMap,
         body: Bytes,
     ) -> impl IntoResponse {
-        super::post_handler(path, state, headers, body, LinkConfig::STANDARD).await
+        let config = LinkConfig::standard(&state.config);
+        super::post_handler(path, State(state), headers, body, config).await
     }
 }
 
-// Thin wrapper handlers for the /link2/ endpoint (with caching)
 pub mod link2 {
     use super::*;
 
-    pub async fn get_handler(path: Path<String>, state: State<AppState>) -> Response {
-        super::get_handler(path, state, LinkConfig::WITH_CACHE).await
+    pub async fn get_handler(path: Path<String>, State(state): State<AppState>) -> Response {
+        let config = LinkConfig::with_cache(&state.config);
+        super::get_handler(path, State(state), config).await
     }
 
     pub async fn post_handler(
         path: Path<String>,
-        state: State<AppState>,
+        State(state): State<AppState>,
         headers: HeaderMap,
         body: Bytes,
     ) -> impl IntoResponse {
-        super::post_handler(path, state, headers, body, LinkConfig::WITH_CACHE).await
+        let config = LinkConfig::with_cache(&state.config);
+        super::post_handler(path, State(state), headers, body, config).await
     }
 }
 
@@ -210,7 +204,6 @@ mod tests {
 
     use crate::http_relay::{Config, HttpRelay};
 
-    // Tests for standard link endpoint (no caching)
     mod link_tests {
         use super::*;
 
@@ -337,7 +330,6 @@ mod tests {
         }
     }
 
-    // Tests for link2 endpoint (with caching)
     mod link2_tests {
         use super::*;
 
@@ -527,7 +519,6 @@ mod tests {
         }
     }
 
-    // Tests for resource limits
     mod limit_tests {
         use super::*;
         use crate::http_relay::link_handler::MAX_CHANNEL_ID_LENGTH;
