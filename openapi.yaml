@@ -8,9 +8,15 @@ info:
     for their counterpart to arrive. The relay facilitates decoupled
     communication between distributed services.
 
-    Two endpoint variants are available:
-    - `/link/{id}` - Standard relay with 10 minute timeout
-    - `/link2/{id}` - Mobile-friendly with caching (25s timeout, 5 min cache TTL)
+    **Two endpoint variants are available:**
+    - `/link2/{id}` - **Recommended.** Short timeout (25s) with caching (5 min TTL)
+    - `/link/{id}` - Backwards compatibility only (10 min timeout, no caching)
+
+    **Use `/link2` for new integrations.** The original `/link` endpoint has a
+    problem on mobile devices: when an app gets backgrounded or killed while
+    waiting, the response never arrives, but the relay considers it consumed.
+    `/link2` solves this with caching (retry and still get the value) and a
+    shorter timeout that works with proxy timeouts (nginx, Cloudflare use 30s).
   version: 0.1.0
   license:
     name: MIT
@@ -23,8 +29,10 @@ servers:
 paths:
   /link/{id}:
     get:
-      summary: Consume a message
+      summary: Consume a message (legacy)
       description: |
+        Legacy endpoint for backwards compatibility. Use `/link2` for new integrations.
+
         Consumer retrieves a message from the channel. Blocks until a producer
         sends data or the timeout (10 minutes) is reached.
       operationId: linkGet
@@ -39,8 +47,10 @@ paths:
           $ref: '#/components/responses/Timeout'
 
     post:
-      summary: Produce a message
+      summary: Produce a message (legacy)
       description: |
+        Legacy endpoint for backwards compatibility. Use `/link2` for new integrations.
+
         Producer sends a message to the channel. Blocks until a consumer
         retrieves the data or the timeout (10 minutes) is reached.
       operationId: linkPost
@@ -58,14 +68,16 @@ paths:
 
   /link2/{id}:
     get:
-      summary: Consume a message (with caching)
+      summary: Consume a message (recommended)
       description: |
+        **Recommended endpoint for new integrations.**
+
         Consumer retrieves a message from the channel. If a cached response
         exists, returns immediately. Otherwise blocks until a producer sends
         data or the timeout (25 seconds) is reached.
 
         Cached responses persist for 5 minutes (configurable), enabling
-        retries after connection drops.
+        retries after connection drops (e.g., mobile app backgrounded).
       operationId: link2Get
       tags:
         - link2
@@ -78,14 +90,17 @@ paths:
           $ref: '#/components/responses/Timeout'
 
     post:
-      summary: Produce a message (invalidates cache)
+      summary: Produce a message (recommended)
       description: |
+        **Recommended endpoint for new integrations.**
+
         Producer sends a message to the channel. Invalidates any existing
         cached response. Blocks until a consumer retrieves the data or the
         timeout (25 seconds) is reached.
 
         After the first consumer retrieves the message, it is cached for
-        subsequent consumers (5 minute TTL).
+        subsequent consumers (5 minute TTL), enabling retries after connection
+        drops (e.g., mobile app backgrounded).
       operationId: link2Post
       tags:
         - link2
@@ -157,6 +172,6 @@ components:
 
 tags:
   - name: link
-    description: Standard relay endpoints (10 minute timeout, no caching)
+    description: Legacy relay endpoints for backwards compatibility (10 min timeout, no caching)
   - name: link2
-    description: Mobile-friendly endpoints (25 second timeout, 5 minute cache TTL)
+    description: Recommended endpoints with retry support (25s timeout, 5 min cache TTL)
