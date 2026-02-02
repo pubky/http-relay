@@ -10,7 +10,7 @@ use axum::{
 };
 
 use super::response::{await_consumer_message, await_producer_completion, build_response};
-use super::waiting_list::Message;
+use super::waiting_list::{LimitError, Message};
 use super::AppState;
 
 /// Configuration for link handler behavior.
@@ -71,7 +71,16 @@ pub async fn get_handler(
     };
 
     // No producer ready. Insert consumer into pending list and wait.
-    let receiver = pending_list.insert_consumer(&id);
+    let receiver = match pending_list.insert_consumer(&id) {
+        Ok(r) => r,
+        Err(LimitError::PendingLimitReached) => {
+            return build_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Server at capacity".into(),
+                None,
+            );
+        }
+    };
     drop(pending_list);
 
     let timeout = get_timeout(&state, config);
@@ -121,7 +130,12 @@ pub async fn post_handler(
     };
 
     // No consumer ready. Insert producer into pending list and wait.
-    let receiver = pending_list.insert_producer(&channel, body, content_type);
+    let receiver = match pending_list.insert_producer(&channel, body, content_type) {
+        Ok(r) => r,
+        Err(LimitError::PendingLimitReached) => {
+            return (StatusCode::SERVICE_UNAVAILABLE, Bytes::from("Server at capacity"));
+        }
+    };
     drop(pending_list);
 
     let timeout = get_timeout(&state, config);
@@ -496,6 +510,102 @@ mod tests {
             assert_eq!(state.pending_list.lock().await.cache_len(), 1);
             let response = server.get("/link2/consumer-first").await;
             assert_eq!(response.text(), "delayed data");
+        }
+    }
+
+    // Tests for resource limits
+    mod limit_tests {
+        use crate::http_relay::waiting_list::{LimitError, WaitingList};
+        use axum::body::Bytes;
+
+        #[test]
+        fn test_pending_limit_consumer() {
+            let mut list = WaitingList::new(2, 10);
+
+            // First two consumers succeed
+            assert!(list.insert_consumer("c1").is_ok());
+            assert!(list.insert_consumer("c2").is_ok());
+            assert_eq!(list.pending_count(), 2);
+
+            // Third consumer fails
+            assert_eq!(
+                list.insert_consumer("c3").unwrap_err(),
+                LimitError::PendingLimitReached
+            );
+        }
+
+        #[test]
+        fn test_pending_limit_producer() {
+            let mut list = WaitingList::new(2, 10);
+
+            // First two producers succeed
+            assert!(list.insert_producer("p1", Bytes::new(), None).is_ok());
+            assert!(list.insert_producer("p2", Bytes::new(), None).is_ok());
+            assert_eq!(list.pending_count(), 2);
+
+            // Third producer fails
+            assert_eq!(
+                list.insert_producer("p3", Bytes::new(), None).unwrap_err(),
+                LimitError::PendingLimitReached
+            );
+        }
+
+        #[test]
+        fn test_pending_limit_mixed() {
+            let mut list = WaitingList::new(2, 10);
+
+            // One consumer and one producer
+            assert!(list.insert_consumer("c1").is_ok());
+            assert!(list.insert_producer("p1", Bytes::new(), None).is_ok());
+            assert_eq!(list.pending_count(), 2);
+
+            // Both consumer and producer fail at limit
+            assert_eq!(
+                list.insert_consumer("c2").unwrap_err(),
+                LimitError::PendingLimitReached
+            );
+            assert_eq!(
+                list.insert_producer("p2", Bytes::new(), None).unwrap_err(),
+                LimitError::PendingLimitReached
+            );
+        }
+
+        #[test]
+        fn test_cache_lru_eviction() {
+            let mut list = WaitingList::new(10, 2);
+            let ttl = std::time::Duration::from_secs(60);
+
+            // Insert two entries
+            list.insert_cached("k1", Bytes::from("first"), None, ttl);
+            list.insert_cached("k2", Bytes::from("second"), None, ttl);
+            assert_eq!(list.cache_len(), 2);
+
+            // Access k1 to make it recently used (k2 is now LRU)
+            assert!(list.get_cached("k1").is_some());
+
+            // Third insert should evict k2 (least recently used)
+            list.insert_cached("k3", Bytes::from("third"), None, ttl);
+            assert_eq!(list.cache_len(), 2);
+
+            // k2 should be gone (was LRU), k1 and k3 should remain
+            assert!(list.get_cached("k1").is_some());
+            assert!(list.get_cached("k2").is_none());
+            assert!(list.get_cached("k3").is_some());
+        }
+
+        #[test]
+        fn test_removing_frees_capacity() {
+            let mut list = WaitingList::new(1, 10);
+
+            // Insert consumer at limit
+            assert!(list.insert_consumer("c1").is_ok());
+            assert!(list.insert_consumer("c2").is_err());
+
+            // Remove it
+            list.remove_consumer("c1");
+
+            // Now we can insert again
+            assert!(list.insert_consumer("c2").is_ok());
         }
     }
 }

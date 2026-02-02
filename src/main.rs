@@ -29,6 +29,18 @@ struct Args {
     #[arg(long, default_value_t = 25)]
     link2_timeout: u64,
 
+    /// Maximum request body size in bytes (default: 10KB)
+    #[arg(long, default_value_t = 10 * 1024)]
+    max_body_size: usize,
+
+    /// Maximum pending requests (producers + consumers combined, default: 10000)
+    #[arg(long, default_value_t = 10_000)]
+    max_pending: usize,
+
+    /// Maximum cached entries (default: 10000)
+    #[arg(long, default_value_t = 10_000)]
+    max_cache: usize,
+
     /// Verbosity level: -v (info), -vv (debug), -vvv (trace)
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -49,6 +61,9 @@ async fn main() -> Result<()> {
         .http_port(args.port)
         .cache_ttl(Duration::from_secs(args.link2_cache_ttl))
         .link2_timeout(Duration::from_secs(args.link2_timeout))
+        .max_body_size(args.max_body_size)
+        .max_pending(args.max_pending)
+        .max_cache(args.max_cache)
         .run()
         .await?;
 

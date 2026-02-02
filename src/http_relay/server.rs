@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::Result;
 
-use axum::{routing::get, Router};
+use axum::{extract::DefaultBodyLimit, routing::get, Router};
 use axum_server::Handle;
 use tokio::sync::Mutex;
 
@@ -27,6 +27,15 @@ const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 /// The default timeout for link2 endpoints (shorter to avoid proxy timeouts like nginx).
 const DEFAULT_LINK2_TIMEOUT: Duration = Duration::from_secs(25);
 
+/// Default maximum request body size (10KB).
+const DEFAULT_MAX_BODY_SIZE: usize = 10 * 1024;
+
+/// Default maximum pending requests (producers + consumers).
+const DEFAULT_MAX_PENDING: usize = 10_000;
+
+/// Default maximum cached entries.
+const DEFAULT_MAX_CACHE: usize = 10_000;
+
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub config: Config,
@@ -35,9 +44,10 @@ pub(crate) struct AppState {
 
 impl AppState {
     pub fn new(config: Config) -> Self {
+        let waiting_list = WaitingList::new(config.max_pending, config.max_cache);
         Self {
             config,
-            pending_list: Arc::new(Mutex::new(WaitingList::default())),
+            pending_list: Arc::new(Mutex::new(waiting_list)),
         }
     }
 }
@@ -51,6 +61,12 @@ pub(crate) struct Config {
     pub cache_ttl: Duration,
     /// Timeout for link2 endpoints (shorter to avoid proxy timeouts).
     pub link2_timeout: Duration,
+    /// Maximum request body size in bytes.
+    pub max_body_size: usize,
+    /// Maximum pending requests (producers + consumers combined).
+    pub max_pending: usize,
+    /// Maximum cached entries.
+    pub max_cache: usize,
 }
 
 impl Default for Config {
@@ -61,6 +77,9 @@ impl Default for Config {
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             cache_ttl: DEFAULT_CACHE_TTL,
             link2_timeout: DEFAULT_LINK2_TIMEOUT,
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
+            max_pending: DEFAULT_MAX_PENDING,
+            max_cache: DEFAULT_MAX_CACHE,
         }
     }
 }
@@ -97,6 +116,24 @@ impl HttpRelayBuilder {
         self
     }
 
+    /// Configure the maximum request body size (default: 10KB).
+    pub fn max_body_size(mut self, size: usize) -> Self {
+        self.0.max_body_size = size;
+        self
+    }
+
+    /// Configure the maximum pending requests (default: 10000).
+    pub fn max_pending(mut self, max: usize) -> Self {
+        self.0.max_pending = max;
+        self
+    }
+
+    /// Configure the maximum cached entries (default: 10000).
+    pub fn max_cache(mut self, max: usize) -> Self {
+        self.0.max_cache = max;
+        self
+    }
+
     /// Start running an HTTP relay.
     pub async fn run(self) -> Result<HttpRelay> {
         HttpRelay::start(self.0).await
@@ -112,6 +149,7 @@ pub struct HttpRelay {
 impl HttpRelay {
     /// Builds the router with all routes and middleware.
     fn build_router(state: AppState) -> Router {
+        let max_body_size = state.config.max_body_size;
         Router::new()
             .route(
                 "/link/{id}",
@@ -121,6 +159,7 @@ impl HttpRelay {
                 "/link2/{id}",
                 get(link2::get_handler).post(link2::post_handler),
             )
+            .layer(DefaultBodyLimit::max(max_body_size))
             .layer(CorsLayer::very_permissive())
             .layer(TraceLayer::new_for_http())
             .with_state(state)

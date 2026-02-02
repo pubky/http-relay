@@ -1,11 +1,13 @@
 use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use axum::body::Bytes;
+use lru::LruCache;
 use tokio::sync::oneshot;
 
 /// A message containing body and optional content type.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Message {
     pub body: Bytes,
     pub content_type: Option<String>,
@@ -38,14 +40,44 @@ impl CachedValue {
 }
 
 /// A list of waiting producers and consumers, plus cached values.
-#[derive(Default)]
 pub struct WaitingList {
     pending_producers: HashMap<String, WaitingProducer>,
     pending_consumers: HashMap<String, WaitingConsumer>,
-    cache: HashMap<String, CachedValue>,
+    cache: LruCache<String, CachedValue>,
+    max_pending: usize,
+}
+
+impl Default for WaitingList {
+    fn default() -> Self {
+        Self::new(10_000, 10_000)
+    }
+}
+
+/// Error returned when a limit is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitError {
+    /// Maximum pending requests reached.
+    PendingLimitReached,
 }
 
 impl WaitingList {
+    /// Creates a new WaitingList with the specified limits.
+    pub fn new(max_pending: usize, max_cache: usize) -> Self {
+        // LruCache requires NonZeroUsize, use 1 as minimum if 0 is passed
+        let cache_cap = NonZeroUsize::new(max_cache).unwrap_or(NonZeroUsize::MIN);
+        Self {
+            pending_producers: HashMap::new(),
+            pending_consumers: HashMap::new(),
+            cache: LruCache::new(cache_cap),
+            max_pending,
+        }
+    }
+
+    /// Returns the current count of pending requests (producers + consumers).
+    pub fn pending_count(&self) -> usize {
+        self.pending_producers.len() + self.pending_consumers.len()
+    }
+
     pub fn remove_producer(&mut self, id: &str) -> Option<WaitingProducer> {
         self.pending_producers.remove(id)
     }
@@ -55,24 +87,31 @@ impl WaitingList {
         id: &str,
         body: Bytes,
         content_type: Option<String>,
-    ) -> oneshot::Receiver<()> {
+    ) -> Result<oneshot::Receiver<()>, LimitError> {
+        if self.pending_count() >= self.max_pending {
+            return Err(LimitError::PendingLimitReached);
+        }
         let (producer, completion_receiver) = WaitingProducer::new(body, content_type);
         self.pending_producers.insert(id.to_string(), producer);
-        completion_receiver
+        Ok(completion_receiver)
     }
 
     pub fn remove_consumer(&mut self, id: &str) -> Option<WaitingConsumer> {
         self.pending_consumers.remove(id)
     }
 
-    pub fn insert_consumer(&mut self, id: &str) -> oneshot::Receiver<Message> {
+    pub fn insert_consumer(&mut self, id: &str) -> Result<oneshot::Receiver<Message>, LimitError> {
+        if self.pending_count() >= self.max_pending {
+            return Err(LimitError::PendingLimitReached);
+        }
         let (consumer, message_receiver) = WaitingConsumer::new();
         self.pending_consumers.insert(id.to_string(), consumer);
-        message_receiver
+        Ok(message_receiver)
     }
 
     /// Gets a cached value if it exists and hasn't expired.
-    pub fn get_cached(&self, id: &str) -> Option<Message> {
+    /// Accessing a value promotes it in the LRU cache.
+    pub fn get_cached(&mut self, id: &str) -> Option<Message> {
         self.cache.get(id).and_then(|cached| {
             if cached.is_expired() {
                 None
@@ -86,6 +125,7 @@ impl WaitingList {
     }
 
     /// Inserts a value into the cache with the given TTL.
+    /// If the cache is full, automatically evicts the least recently used entry.
     pub fn insert_cached(
         &mut self,
         id: &str,
@@ -94,19 +134,29 @@ impl WaitingList {
         ttl: std::time::Duration,
     ) {
         self.cache
-            .insert(id.to_string(), CachedValue::new(body, content_type, ttl));
+            .push(id.to_string(), CachedValue::new(body, content_type, ttl));
     }
 
     /// Removes a value from the cache and returns it if it existed.
     pub fn remove_cached(&mut self, id: &str) -> Option<CachedValue> {
-        self.cache.remove(id)
+        self.cache.pop(id)
     }
 
     /// Removes expired entries from the cache. Returns the number removed.
     pub fn cleanup_expired_cache(&mut self) -> usize {
-        let before = self.cache.len();
-        self.cache.retain(|_, v| !v.is_expired());
-        before - self.cache.len()
+        // Collect expired keys first to avoid borrow issues
+        let expired_keys: Vec<String> = self
+            .cache
+            .iter()
+            .filter(|(_, v)| v.is_expired())
+            .map(|(k, _)| k.clone())
+            .collect();
+
+        let count = expired_keys.len();
+        for key in expired_keys {
+            self.cache.pop(&key);
+        }
+        count
     }
 }
 

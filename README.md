@@ -57,6 +57,9 @@ pubky-http-relay --bind 127.0.0.1 --port 15412 --link2-cache-ttl 300 --link2-tim
 | `--port <PORT>` | HTTP port (0 = random) | `8080` |
 | `--link2-cache-ttl <SECS>` | Cache TTL for link2 | `300` |
 | `--link2-timeout <SECS>` | Link2 endpoint timeout | `25` |
+| `--max-body-size <BYTES>` | Max request body size | `10240` (10KB) |
+| `--max-pending <N>` | Max pending requests | `10000` |
+| `--max-cache <N>` | Max cached entries | `10000` |
 | `-v` | Verbosity (repeat for more) | warn |
 | `-q, --quiet` | Silence output | - |
 
@@ -94,6 +97,7 @@ curl -X POST http://localhost:8080/link/my-channel \
 **Responses:**
 - `200 OK` - Consumer received the message
 - `408 Request Timeout` - No consumer arrived in time
+- `503 Service Unavailable` - Server at capacity (max pending reached)
 
 ### GET `/link/{id}` or `/link2/{id}`
 
@@ -106,6 +110,7 @@ curl http://localhost:8080/link/my-channel
 **Responses:**
 - `200 OK` - Returns producer's payload with original Content-Type
 - `408 Request Timeout` - No producer arrived in time
+- `503 Service Unavailable` - Server at capacity (max pending reached)
 
 ### Endpoint Differences
 
