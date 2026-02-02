@@ -5,8 +5,8 @@ version = "0.6.0"
 edition = "2021"
 authors = ["SeverinAlexB"]
 license = "MIT"
-homepage = "https://github.com/pubky/pubky-http-relay"
-repository = "https://github.com/pubky/pubky-http-relay"
+homepage = "https://github.com/pubky/http-relay"
+repository = "https://github.com/pubky/http-relay"
 keywords = ["httprelay", "http", "relay"]
 categories = ["web-programming"]
 

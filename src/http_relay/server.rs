@@ -158,6 +158,7 @@ impl HttpRelay {
     fn build_router(state: AppState) -> Router {
         let max_body_size = state.config.max_body_size;
         Router::new()
+            .route("/", get(|| async { "Http Relay" }))
             .route(
                 "/link/{id}",
                 get(link::get_handler).post(link::post_handler),
@@ -197,6 +198,7 @@ impl HttpRelay {
 
         let http_listener =
             TcpListener::bind(SocketAddr::new(config.bind_address, config.http_port))?;
+        http_listener.set_nonblocking(true)?;
         let http_address = http_listener.local_addr()?;
 
         let server = axum_server::from_tcp(http_listener)?;
@@ -270,5 +272,18 @@ impl HttpRelay {
 impl Drop for HttpRelay {
     fn drop(&mut self) {
         self.http_handle.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_root_returns_http_relay() {
+        let (server, _state) = HttpRelay::create_test_server(Config::default());
+        let response = server.get("/").await;
+        assert_eq!(response.status_code(), 200);
+        assert_eq!(response.text(), "Http Relay");
     }
 }

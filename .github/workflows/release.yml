@@ -11,7 +11,7 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -19,20 +19,27 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            name: linux-x64
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
+            name: linux-x64-musl
             musl: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+            name: linux-arm64
             cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
+            name: macos-x64
           - target: aarch64-apple-darwin
             os: macos-latest
+            name: macos-arm64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
+            name: windows-x64
           - target: aarch64-pc-windows-msvc
             os: windows-latest
+            name: windows-arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -63,19 +70,19 @@ jobs:
         if: matrix.os != 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          tar -czvf ../../../http-relay-${{ matrix.target }}.tar.gz http-relay
+          tar -czvf ../../../http-relay-${{ matrix.name }}.tar.gz http-relay
 
       - name: Package (Windows)
         if: matrix.os == 'windows-latest'
         run: |
           cd target/${{ matrix.target }}/release
-          7z a ../../../http-relay-${{ matrix.target }}.zip http-relay.exe
+          7z a ../../../http-relay-${{ matrix.name }}.zip http-relay.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: http-relay-${{ matrix.target }}
-          path: http-relay-${{ matrix.target }}.*
+          name: http-relay-${{ matrix.name }}
+          path: http-relay-${{ matrix.name }}.*
 
   release:
     name: Create Release
