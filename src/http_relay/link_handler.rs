@@ -20,8 +20,8 @@ use axum::{
 };
 
 use super::response::{await_consumer_message, await_producer_completion, build_response};
-use super::waiting_list::{LimitError, Message};
 use super::server::Config;
+use super::waiting_list::{LimitError, Message};
 use super::AppState;
 
 /// Maximum allowed length for channel IDs (in bytes).
