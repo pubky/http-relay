@@ -110,42 +110,41 @@ pub struct HttpRelay {
 }
 
 impl HttpRelay {
+    /// Builds the router with all routes and middleware.
+    fn build_router(state: AppState) -> Router {
+        Router::new()
+            .route(
+                "/link/{id}",
+                get(link::get_handler).post(link::post_handler),
+            )
+            .route(
+                "/link2/{id}",
+                get(link2::get_handler).post(link2::post_handler),
+            )
+            .layer(CorsLayer::very_permissive())
+            .layer(TraceLayer::new_for_http())
+            .with_state(state)
+    }
+
     /// Creates the HTTP router for the HTTP relay.
     #[cfg(test)]
     pub(crate) fn create_app(config: Config) -> Result<(Router, AppState)> {
         let app_state = AppState::new(config);
-
-        let app = Router::new()
-            .route(
-                "/link/{id}",
-                get(link::get_handler).post(link::post_handler),
-            )
-            .route(
-                "/link2/{id}",
-                get(link2::get_handler).post(link2::post_handler),
-            )
-            .layer(CorsLayer::very_permissive())
-            .layer(TraceLayer::new_for_http())
-            .with_state(app_state.clone());
-
+        let app = Self::build_router(app_state.clone());
         Ok((app, app_state))
+    }
+
+    /// Creates a test server with the given config. Returns both the server and app state.
+    #[cfg(test)]
+    pub(crate) fn create_test_server(config: Config) -> (axum_test::TestServer, AppState) {
+        let (app, state) = Self::create_app(config).unwrap();
+        let server = axum_test::TestServer::new(app).unwrap();
+        (server, state)
     }
 
     async fn start(config: Config) -> Result<Self> {
         let app_state = AppState::new(config.clone());
-
-        let app = Router::new()
-            .route(
-                "/link/{id}",
-                get(link::get_handler).post(link::post_handler),
-            )
-            .route(
-                "/link2/{id}",
-                get(link2::get_handler).post(link2::post_handler),
-            )
-            .layer(CorsLayer::very_permissive())
-            .layer(TraceLayer::new_for_http())
-            .with_state(app_state.clone());
+        let app = Self::build_router(app_state.clone());
 
         let http_handle = Handle::new();
         let shutdown_handle = http_handle.clone();

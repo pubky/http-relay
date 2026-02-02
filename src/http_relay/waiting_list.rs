@@ -40,9 +40,9 @@ impl CachedValue {
 /// A list of waiting producers and consumers, plus cached values.
 #[derive(Default)]
 pub struct WaitingList {
-    pub pending_producers: HashMap<String, WaitingProducer>,
-    pub pending_consumers: HashMap<String, WaitingConsumer>,
-    pub cache: HashMap<String, CachedValue>,
+    pending_producers: HashMap<String, WaitingProducer>,
+    pending_consumers: HashMap<String, WaitingConsumer>,
+    cache: HashMap<String, CachedValue>,
 }
 
 impl WaitingList {
@@ -95,6 +95,11 @@ impl WaitingList {
     ) {
         self.cache
             .insert(id.to_string(), CachedValue::new(body, content_type, ttl));
+    }
+
+    /// Removes a value from the cache and returns it if it existed.
+    pub fn remove_cached(&mut self, id: &str) -> Option<CachedValue> {
+        self.cache.remove(id)
     }
 
     /// Removes expired entries from the cache. Returns the number removed.
