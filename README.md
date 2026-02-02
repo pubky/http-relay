@@ -5,7 +5,7 @@
 [![Documentation](https://docs.rs/http-relay/badge.svg)](https://docs.rs/http-relay)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A Rust implementation of a subset of the [HTTP Relay spec](https://httprelay.io/)
+A Rust implementation of the `/link` endpoint from the [HTTP Relay spec](https://httprelay.io/)
 for asynchronous producer/consumer message passing.
 
 ## What is this?
@@ -13,6 +13,9 @@ for asynchronous producer/consumer message passing.
 An HTTP relay enables decoupled communication between distributed services.
 Instead of direct synchronous calls, producers and consumers communicate through
 relay endpoints, each waiting for their counterpart to arrive.
+
+**Non-standard extension:** Adds a `/link2` endpoint optimized for mobile
+clients with caching and shorter timeouts.
 
 **Use cases:**
 - Connecting services that can't communicate directly
@@ -47,18 +50,21 @@ http-relay = "0.6"
 ### As CLI
 
 ```bash
-# Default: bind to 0.0.0.0:8080
+# Default: bind to 127.0.0.1:8080 (localhost only)
 http-relay
 
+# Bind to all interfaces (for production/Docker)
+http-relay --bind 0.0.0.0
+
 # Custom configuration
-http-relay --bind 127.0.0.1 --port 15412 --link2-cache-ttl 300 --link2-timeout 25 -vv
+http-relay --bind 0.0.0.0 --port 15412 --link2-cache-ttl 300 --link2-timeout 25 -vv
 ```
 
 **Options:**
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--bind <ADDR>` | Bind address | `0.0.0.0` |
+| `--bind <ADDR>` | Bind address | `127.0.0.1` |
 | `--port <PORT>` | HTTP port (0 = random) | `8080` |
 | `--link2-cache-ttl <SECS>` | Cache TTL for link2 | `300` |
 | `--link2-timeout <SECS>` | Link2 endpoint timeout | `25` |

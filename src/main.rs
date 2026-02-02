@@ -14,7 +14,7 @@ use tracing_subscriber::EnvFilter;
 #[command(version)]
 struct Args {
     /// Address to bind to
-    #[arg(short, long, default_value = "0.0.0.0")]
+    #[arg(short, long, default_value = "127.0.0.1")]
     bind: IpAddr,
 
     /// Port to listen on (0 = random available port)

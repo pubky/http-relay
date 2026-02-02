@@ -79,7 +79,7 @@ pub(crate) struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            bind_address: IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+            bind_address: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             http_port: 0,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             cache_ttl: DEFAULT_CACHE_TTL,
@@ -96,7 +96,7 @@ impl Default for Config {
 pub struct HttpRelayBuilder(Config);
 
 impl HttpRelayBuilder {
-    /// Configure the address to bind to (default: 0.0.0.0).
+    /// Configure the address to bind to (default: 127.0.0.1).
     pub fn bind_address(mut self, addr: IpAddr) -> Self {
         self.0.bind_address = addr;
         self
