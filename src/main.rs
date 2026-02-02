@@ -21,9 +21,9 @@ struct Args {
     #[arg(short, long, default_value_t = 8080)]
     port: u16,
 
-    /// Cache TTL in seconds for retry support
-    #[arg(long, default_value_t = 30)]
-    cache_ttl: u64,
+    /// Cache TTL in seconds for retry support (link2 endpoint)
+    #[arg(long, default_value_t = 300)]
+    link2_cache_ttl: u64,
 
     /// Link2 endpoint timeout in seconds (shorter to avoid proxy timeouts)
     #[arg(long, default_value_t = 25)]
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
     let relay = HttpRelayBuilder::default()
         .bind_address(args.bind)
         .http_port(args.port)
-        .cache_ttl(Duration::from_secs(args.cache_ttl))
+        .cache_ttl(Duration::from_secs(args.link2_cache_ttl))
         .link2_timeout(Duration::from_secs(args.link2_timeout))
         .run()
         .await?;

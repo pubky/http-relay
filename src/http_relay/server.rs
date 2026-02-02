@@ -22,7 +22,7 @@ use super::waiting_list::WaitingList;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// The default time-to-live for cached values after first consumer retrieves them.
-const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(30);
+const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// The default timeout for link2 endpoints (shorter to avoid proxy timeouts like nginx).
 const DEFAULT_LINK2_TIMEOUT: Duration = Duration::from_secs(25);
@@ -82,7 +82,7 @@ impl HttpRelayBuilder {
         self
     }
 
-    /// Configure the TTL for cached values (default: 30 seconds).
+    /// Configure the TTL for cached values (default: 5 minutes).
     /// Values remain available for this duration after the first consumer
     /// retrieves them.
     pub fn cache_ttl(mut self, ttl: Duration) -> Self {

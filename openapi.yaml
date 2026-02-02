@@ -1,0 +1,162 @@
+openapi: 3.0.3
+info:
+  title: pubky-http-relay
+  description: |
+    An HTTP relay for asynchronous producer/consumer message passing.
+
+    Producers POST data to a channel, consumers GET it. Each party waits
+    for their counterpart to arrive. The relay facilitates decoupled
+    communication between distributed services.
+
+    Two endpoint variants are available:
+    - `/link/{id}` - Standard relay with 10 minute timeout
+    - `/link2/{id}` - Mobile-friendly with caching (25s timeout, 5 min cache TTL)
+  version: 0.1.0
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+
+paths:
+  /link/{id}:
+    get:
+      summary: Consume a message
+      description: |
+        Consumer retrieves a message from the channel. Blocks until a producer
+        sends data or the timeout (10 minutes) is reached.
+      operationId: linkGet
+      tags:
+        - link
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageReceived'
+        '408':
+          $ref: '#/components/responses/Timeout'
+
+    post:
+      summary: Produce a message
+      description: |
+        Producer sends a message to the channel. Blocks until a consumer
+        retrieves the data or the timeout (10 minutes) is reached.
+      operationId: linkPost
+      tags:
+        - link
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      requestBody:
+        $ref: '#/components/requestBodies/Message'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageDelivered'
+        '408':
+          $ref: '#/components/responses/Timeout'
+
+  /link2/{id}:
+    get:
+      summary: Consume a message (with caching)
+      description: |
+        Consumer retrieves a message from the channel. If a cached response
+        exists, returns immediately. Otherwise blocks until a producer sends
+        data or the timeout (25 seconds) is reached.
+
+        Cached responses persist for 5 minutes (configurable), enabling
+        retries after connection drops.
+      operationId: link2Get
+      tags:
+        - link2
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageReceived'
+        '408':
+          $ref: '#/components/responses/Timeout'
+
+    post:
+      summary: Produce a message (invalidates cache)
+      description: |
+        Producer sends a message to the channel. Invalidates any existing
+        cached response. Blocks until a consumer retrieves the data or the
+        timeout (25 seconds) is reached.
+
+        After the first consumer retrieves the message, it is cached for
+        subsequent consumers (5 minute TTL).
+      operationId: link2Post
+      tags:
+        - link2
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      requestBody:
+        $ref: '#/components/requestBodies/Message'
+      responses:
+        '200':
+          $ref: '#/components/responses/MessageDelivered'
+        '408':
+          $ref: '#/components/responses/Timeout'
+
+components:
+  parameters:
+    channelId:
+      name: id
+      in: path
+      required: true
+      description: Unique channel identifier. Producers and consumers using the same ID are paired.
+      schema:
+        type: string
+      example: my-channel
+
+  requestBodies:
+    Message:
+      description: Message payload to send
+      required: true
+      content:
+        application/octet-stream:
+          schema:
+            type: string
+            format: binary
+        application/json:
+          schema:
+            type: object
+          example:
+            hello: world
+        text/plain:
+          schema:
+            type: string
+          example: Hello, world!
+
+  responses:
+    MessageReceived:
+      description: Message successfully retrieved from producer
+      headers:
+        Content-Type:
+          description: Content-Type from the producer's request (if provided)
+          schema:
+            type: string
+      content:
+        application/octet-stream:
+          schema:
+            type: string
+            format: binary
+        application/json:
+          schema:
+            type: object
+        text/plain:
+          schema:
+            type: string
+
+    MessageDelivered:
+      description: Message successfully delivered to consumer
+
+    Timeout:
+      description: Timeout waiting for counterpart (producer or consumer)
+
+tags:
+  - name: link
+    description: Standard relay endpoints (10 minute timeout, no caching)
+  - name: link2
+    description: Mobile-friendly endpoints (25 second timeout, 5 minute cache TTL)
