@@ -199,9 +199,9 @@ impl HttpRelay {
             TcpListener::bind(SocketAddr::new(config.bind_address, config.http_port))?;
         let http_address = http_listener.local_addr()?;
 
+        let server = axum_server::from_tcp(http_listener)?;
         tokio::spawn(async move {
-            axum_server::from_tcp(http_listener)
-                .expect("Failed to create server from TCP listener")
+            server
                 .handle(http_handle.clone())
                 .serve(app.into_make_service())
                 .await
