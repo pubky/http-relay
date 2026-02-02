@@ -41,7 +41,11 @@ where
         Ok(Err(_)) => build_response(StatusCode::NOT_FOUND, "Not Found".into(), None),
         Err(_) => {
             on_timeout().await;
-            build_response(StatusCode::REQUEST_TIMEOUT, "Request timed out".into(), None)
+            build_response(
+                StatusCode::REQUEST_TIMEOUT,
+                "Request timed out".into(),
+                None,
+            )
         }
     }
 }

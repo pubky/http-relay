@@ -22,8 +22,8 @@ use tokio::sync::Mutex;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use url::Url;
 
-use super::{link, link2};
 use super::waiting_list::WaitingList;
+use super::{link, link2};
 
 /// The timeout for a request to be considered unused.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -195,7 +195,8 @@ impl HttpRelay {
         let http_handle = Handle::new();
         let shutdown_handle = http_handle.clone();
 
-        let http_listener = TcpListener::bind(SocketAddr::new(config.bind_address, config.http_port))?;
+        let http_listener =
+            TcpListener::bind(SocketAddr::new(config.bind_address, config.http_port))?;
         let http_address = http_listener.local_addr()?;
 
         tokio::spawn(async move {

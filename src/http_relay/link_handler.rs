@@ -143,10 +143,7 @@ pub async fn post_handler(
                 state.config.cache_ttl,
             );
         }
-        let msg = Message {
-            body,
-            content_type,
-        };
+        let msg = Message { body, content_type };
         let _ = consumer.message_sender.send(msg);
         return (StatusCode::OK, Bytes::new());
     };
@@ -155,7 +152,10 @@ pub async fn post_handler(
     let receiver = match pending_list.insert_producer(&channel, body, content_type) {
         Ok(r) => r,
         Err(LimitError::PendingLimitReached) => {
-            return (StatusCode::SERVICE_UNAVAILABLE, Bytes::from("Server at capacity"));
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Bytes::from("Server at capacity"),
+            );
         }
     };
     drop(pending_list);
@@ -441,11 +441,7 @@ mod tests {
             tokio::join!(producer1, consumer1);
 
             // Verify first value is cached
-            let cached = state
-                .pending_list
-                .lock()
-                .await
-                .get_cached("overwrite-test");
+            let cached = state.pending_list.lock().await.get_cached("overwrite-test");
             assert_eq!(cached.unwrap().body.as_ref(), b"first value");
 
             // Second producer posts new value - should overwrite and wait
@@ -461,11 +457,7 @@ mod tests {
             assert_eq!(response.text(), "second value");
 
             // Verify new value is cached
-            let cached = state
-                .pending_list
-                .lock()
-                .await
-                .get_cached("overwrite-test");
+            let cached = state.pending_list.lock().await.get_cached("overwrite-test");
             assert_eq!(cached.unwrap().body.as_ref(), b"second value");
         }
 
