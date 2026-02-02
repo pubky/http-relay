@@ -1,4 +1,4 @@
-# pubky-http-relay
+# http-relay
 
 A Rust implementation of a subset of the [HTTP Relay spec](https://httprelay.io/)
 for asynchronous producer/consumer message passing.
@@ -27,14 +27,14 @@ relay endpoints, each waiting for their counterpart to arrive.
 ## Installation
 
 ```bash
-cargo install --path .
+cargo install http-relay
 ```
 
 Or add as a dependency:
 
 ```toml
 [dependencies]
-pubky-http-relay = { git = "https://github.com/pubky/pubky-http-relay" }
+http-relay = "0.6"
 ```
 
 ## Usage
@@ -43,10 +43,10 @@ pubky-http-relay = { git = "https://github.com/pubky/pubky-http-relay" }
 
 ```bash
 # Default: bind to 0.0.0.0:8080
-pubky-http-relay
+http-relay
 
 # Custom configuration
-pubky-http-relay --bind 127.0.0.1 --port 15412 --link2-cache-ttl 300 --link2-timeout 25 -vv
+http-relay --bind 127.0.0.1 --port 15412 --link2-cache-ttl 300 --link2-timeout 25 -vv
 ```
 
 **Options:**
@@ -66,7 +66,7 @@ pubky-http-relay --bind 127.0.0.1 --port 15412 --link2-cache-ttl 300 --link2-tim
 ### As Library
 
 ```rust
-use pubky_http_relay::HttpRelayBuilder;
+use http_relay::HttpRelayBuilder;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
