@@ -1,4 +1,14 @@
 //! Generic link handler that can operate with or without caching.
+//!
+//! # Security
+//!
+//! Channel IDs act as shared secrets. Anyone who knows an ID can read/write to that
+//! channel. IDs must be cryptographically random (e.g., 128-bit UUIDs). Predictable
+//! IDs allow attackers to intercept messages.
+//!
+//! When caching is enabled (`/link2`), delivered messages stay in plaintext memory
+//! for the TTL duration. Multiple consumers can retrieve the same cached value.
+//! Do not relay sensitive one-time credentials via cached endpoints.
 
 use std::time::Duration;
 
@@ -12,6 +22,10 @@ use axum::{
 use super::response::{await_consumer_message, await_producer_completion, build_response};
 use super::waiting_list::{LimitError, Message};
 use super::AppState;
+
+/// Maximum allowed length for channel IDs (in bytes).
+/// Prevents DoS via extremely long IDs used as HashMap keys.
+const MAX_CHANNEL_ID_LENGTH: usize = 256;
 
 /// Configuration for link handler behavior.
 #[derive(Clone, Copy)]
@@ -47,6 +61,10 @@ pub async fn get_handler(
     State(state): State<AppState>,
     config: LinkConfig,
 ) -> Response {
+    if id.len() > MAX_CHANNEL_ID_LENGTH {
+        return build_response(StatusCode::BAD_REQUEST, "Channel ID too long".into(), None);
+    }
+
     let mut pending_list = state.pending_list.lock().await;
 
     // Check cache if caching is enabled
@@ -99,6 +117,10 @@ pub async fn post_handler(
     body: Bytes,
     config: LinkConfig,
 ) -> impl IntoResponse {
+    if channel.len() > MAX_CHANNEL_ID_LENGTH {
+        return (StatusCode::BAD_REQUEST, Bytes::from("Channel ID too long"));
+    }
+
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -515,6 +537,8 @@ mod tests {
 
     // Tests for resource limits
     mod limit_tests {
+        use super::*;
+        use crate::http_relay::link_handler::MAX_CHANNEL_ID_LENGTH;
         use crate::http_relay::waiting_list::{LimitError, WaitingList};
         use axum::body::Bytes;
 
@@ -606,6 +630,30 @@ mod tests {
 
             // Now we can insert again
             assert!(list.insert_consumer("c2").is_ok());
+        }
+
+        #[tokio::test]
+        async fn test_channel_id_too_long() {
+            let (server, _state) = HttpRelay::create_test_server(Config::default());
+
+            // Create an ID that exceeds the limit
+            let long_id = "x".repeat(MAX_CHANNEL_ID_LENGTH + 1);
+
+            // GET should reject long IDs
+            let response = server.get(&format!("/link/{}", long_id)).await;
+            assert_eq!(response.status_code(), 400);
+            assert_eq!(response.text(), "Channel ID too long");
+
+            // POST should reject long IDs
+            let body = axum::body::Bytes::from_static(b"test");
+            let response = server.post(&format!("/link/{}", long_id)).bytes(body).await;
+            assert_eq!(response.status_code(), 400);
+            assert_eq!(response.text(), "Channel ID too long");
+
+            // IDs at the limit should work
+            let ok_id = "x".repeat(MAX_CHANNEL_ID_LENGTH);
+            let response = server.get(&format!("/link2/{}", ok_id)).await;
+            assert_ne!(response.status_code(), 400); // Should timeout, not reject
         }
     }
 }

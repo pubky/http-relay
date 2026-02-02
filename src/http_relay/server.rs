@@ -1,4 +1,11 @@
 //! HTTP relay server implementation.
+//!
+//! # CORS Configuration
+//!
+//! This server uses permissive CORS (`Access-Control-Allow-Origin: *`) to allow
+//! web browsers to communicate from any origin. This is intentional for public
+//! relay deployments. For restricted environments, modify `CorsLayer::very_permissive()`
+//! in `build_router()`.
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
