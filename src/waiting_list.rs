@@ -1,13 +1,38 @@
 use std::collections::HashMap;
+use std::time::Instant;
 
 use axum::body::Bytes;
 use tokio::sync::oneshot;
 
-/// A list of waiting producers and consumers.
+/// A cached value with its expiration time.
+pub struct CachedValue {
+    /// The cached payload.
+    pub body: Bytes,
+    /// When this cached value expires.
+    pub expires_at: Instant,
+}
+
+impl CachedValue {
+    /// Creates a new cached value that expires after the given duration.
+    pub fn new(body: Bytes, ttl: std::time::Duration) -> Self {
+        Self {
+            body,
+            expires_at: Instant::now() + ttl,
+        }
+    }
+
+    /// Returns true if this cached value has expired.
+    pub fn is_expired(&self) -> bool {
+        Instant::now() >= self.expires_at
+    }
+}
+
+/// A list of waiting producers and consumers, plus cached values.
 #[derive(Default)]
 pub struct WaitingList {
     pub pending_producers: HashMap<String, WaitingProducer>,
     pub pending_consumers: HashMap<String, WaitingConsumer>,
+    pub cache: HashMap<String, CachedValue>,
 }
 
 impl WaitingList {
@@ -30,12 +55,40 @@ impl WaitingList {
         self.pending_consumers.insert(id.to_string(), consumer);
         message_receiver
     }
+
+    /// Gets a cached value if it exists and hasn't expired.
+    pub fn get_cached(&self, id: &str) -> Option<Bytes> {
+        self.cache.get(id).and_then(|cached| {
+            if cached.is_expired() {
+                None
+            } else {
+                Some(cached.body.clone())
+            }
+        })
+    }
+
+    /// Inserts a value into the cache with the given TTL.
+    pub fn insert_cached(&mut self, id: &str, body: Bytes, ttl: std::time::Duration) {
+        self.cache
+            .insert(id.to_string(), CachedValue::new(body, ttl));
+    }
+
+    /// Removes expired entries from the cache. Returns the number removed.
+    pub fn cleanup_expired_cache(&mut self) -> usize {
+        let before = self.cache.len();
+        self.cache.retain(|_, v| !v.is_expired());
+        before - self.cache.len()
+    }
 }
 
 #[cfg(test)]
 impl WaitingList {
     pub fn is_empty(&self) -> bool {
         self.pending_producers.is_empty() && self.pending_consumers.is_empty()
+    }
+
+    pub fn cache_len(&self) -> usize {
+        self.cache.len()
     }
 }
 
