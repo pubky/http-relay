@@ -1,5 +1,10 @@
 # http-relay
 
+[![Crates.io](https://img.shields.io/crates/v/http-relay.svg)](https://crates.io/crates/http-relay)
+[![CI](https://github.com/pubky/http-relay/actions/workflows/ci.yml/badge.svg)](https://github.com/pubky/http-relay/actions/workflows/ci.yml)
+[![Documentation](https://docs.rs/http-relay/badge.svg)](https://docs.rs/http-relay)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A Rust implementation of a subset of the [HTTP Relay spec](https://httprelay.io/)
 for asynchronous producer/consumer message passing.
 
