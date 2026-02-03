@@ -36,5 +36,24 @@ Your friend opens the link → same channel ID is pre-filled → they can immedi
 
 ## Configuration
 
-- **Relay URL** - Default `http://localhost:8080`, change if your relay runs elsewhere
-- **Channel ID** - Any string, shared between consumer and producer
+### Relay URL
+
+Default: `http://localhost:8080`
+
+Set via environment variable:
+```bash
+NEXT_PUBLIC_RELAY_URL=https://relay.example.com npm run dev
+```
+
+Or via URL query param:
+```
+http://localhost:3000?relay=https://relay.example.com
+```
+
+### Endpoint
+
+Toggle between `/link2` (recommended, with caching) and `/link` (deprecated) in the UI.
+
+### Channel ID
+
+Any string, shared between consumer and producer. Can be set via `?channel=` query param.

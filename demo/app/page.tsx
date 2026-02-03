@@ -13,9 +13,11 @@ function generateRandomId() {
   return Math.random().toString(36).substring(2, 10)
 }
 
+const DEFAULT_RELAY_URL = process.env.NEXT_PUBLIC_RELAY_URL || 'http://localhost:8080'
+
 function HomeContent() {
   const searchParams = useSearchParams()
-  const [relayUrl, setRelayUrl] = useState('http://localhost:8080')
+  const [relayUrl, setRelayUrl] = useState(DEFAULT_RELAY_URL)
   const [endpoint, setEndpoint] = useState<'link' | 'link2'>('link2')
   const [channelId, setChannelId] = useState('')
   const [producerContent, setProducerContent] = useState('hello world')
@@ -26,10 +28,12 @@ function HomeContent() {
   const consumerAbortRef = useRef<AbortController | null>(null)
   const producerAbortRef = useRef<AbortController | null>(null)
 
-  // Read channel from URL on mount
+  // Read config from URL on mount
   useEffect(() => {
     const channel = searchParams.get('channel')
+    const relay = searchParams.get('relay')
     if (channel) setChannelId(channel)
+    if (relay) setRelayUrl(relay)
   }, [searchParams])
 
   // Update URL when channel changes
