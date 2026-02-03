@@ -106,8 +106,8 @@ curl -X POST http://localhost:8080/link/my-channel \
 ```
 
 **Responses:**
-- `200 OK` - Consumer received the message (confirmed via two-phase ACK)
-- `408 Request Timeout` - No consumer arrived, or consumer disconnected before receiving
+- `200 OK` - Consumer received the message
+- `408 Request Timeout` - No consumer arrived in time
 - `503 Service Unavailable` - Server at capacity (max pending reached)
 
 ### GET `/link/{id}` or `/link2/{id}`
@@ -143,18 +143,13 @@ OS, the HTTP response never actually arrives on the device. From the relay's
 perspective, the value was consumed successfully. But the mobile app never
 received it—and when the user reopens the app, the value is gone.
 
-`/link2` solves this with three mechanisms:
+`/link2` solves this with two mechanisms:
 
 1. **Caching**: After a successful delivery, the value is cached for 5 minutes.
    If the mobile app was killed, it can retry and still receive the value.
 
 2. **Shorter timeout**: The 25-second timeout stays safely under typical proxy
    timeouts (nginx, Cloudflare often use 30s), preventing unexpected connection drops.
-
-3. **Two-phase acknowledgment**: The producer only receives `200 OK` after the
-   consumer has actually received the response body. If the consumer disconnects
-   mid-transfer, the producer gets `408` and can retry. This prevents the relay
-   from reporting success when the data never reached the client.
 
 ## Client Implementation Patterns
 
@@ -216,10 +211,33 @@ async function produceToRelay(channelId, data) {
   have 30s timeouts. The 25s link2 timeout stays safely under this limit.
 - **Cache enables resilience**: Once delivered, the value is cached for 5 min.
   If a consumer's connection drops, they can retry and still receive it.
-- **Two-phase ACK ensures correctness**: Producers only get `200 OK` after the
-  consumer actually received the data. A `408` means retry is safe and necessary.
-- **408 is not an error**: It just means the counterpart hasn't arrived yet,
-  or disconnected before completing the transfer. Keep trying until success.
+- **408 is not an error**: It just means the counterpart hasn't arrived yet.
+  Keep trying until success.
+
+## Limitations
+
+### TCP Cannot Detect Sudden Disconnects
+
+When a consumer's network disappears suddenly (e.g., turning off Wi-Fi, entering
+a tunnel, or the app being killed), the relay cannot detect this immediately.
+TCP connections rely on acknowledgments that can take 30+ seconds to fail when
+packets simply vanish into the void.
+
+**What this means:**
+- The producer may receive `200 OK` even though the consumer never got the data
+- The relay writes the response to its TCP buffer, which succeeds locally
+- Only later does TCP realize the packets never reached the destination
+
+**Why caching is the real safety net:**
+- True delivery confirmation would require application-level acknowledgment
+  (consumer makes a follow-up request), which changes the API significantly
+- Instead, `/link2` caches delivered values for 5 minutes
+- If the consumer's app was killed or lost connection, they can retry and still
+  receive the value from cache
+
+**Design clients accordingly:** Don't assume `200 OK` from the producer means
+the consumer definitely received the data. The consumer should always be prepared
+to retry, and the caching mechanism ensures they can recover.
 
 ## Development
 

@@ -19,13 +19,10 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use super::response::{
-    await_consumer_message, await_producer_completion, build_ack_response, build_response,
-};
+use super::response::{await_consumer_message, await_producer_completion, build_response};
 use super::server::Config;
-use super::waiting_list::{LimitError, MessageWithAck};
+use super::waiting_list::{LimitError, Message};
 use super::AppState;
-use tokio::sync::oneshot;
 
 /// Maximum allowed length for channel IDs (in bytes).
 /// Prevents DoS via extremely long IDs used as HashMap keys.
@@ -85,13 +82,10 @@ pub async fn get_handler(
                 state.config.cache_ttl,
             );
         }
-        // Create ack channel for two-phase acknowledgment
-        let (ack_tx, ack_rx) = oneshot::channel();
-        // Send ack_receiver to producer so they can wait for delivery confirmation
-        let _ = producer.ack_receiver_sender.send(ack_rx);
-        // Return AckBody response - producer won't get success until this is delivered
-        return build_ack_response(StatusCode::OK, producer.body, producer.content_type, ack_tx);
-    };
+        // Signal completion to the waiting producer
+        let _ = producer.completion_sender.send(());
+        return build_response(StatusCode::OK, producer.body, producer.content_type);
+    }
 
     let receiver = match pending_list.insert_consumer(&id) {
         Ok(r) => r,
@@ -136,16 +130,13 @@ pub async fn post_handler(
     }
 
     if let Some(consumer) = pending_list.remove_consumer(&channel) {
-        // Create ack channel for two-phase acknowledgment
-        let (ack_tx, ack_rx) = oneshot::channel();
-        let msg = MessageWithAck {
+        let msg = Message {
             body: body.clone(),
             content_type: content_type.clone(),
-            ack_sender: ack_tx,
         };
         match consumer.message_sender.send(msg) {
             Ok(()) => {
-                // Consumer is alive - cache if enabled and wait for ACK
+                // Consumer received the message - cache if enabled
                 if config.caching_enabled {
                     pending_list.insert_cached(
                         &channel,
@@ -154,18 +145,7 @@ pub async fn post_handler(
                         state.config.cache_ttl,
                     );
                 }
-                drop(pending_list);
-                return match tokio::time::timeout(config.timeout, ack_rx).await {
-                    Ok(Ok(())) => (StatusCode::OK, Bytes::new()),
-                    Ok(Err(_)) => (
-                        StatusCode::REQUEST_TIMEOUT,
-                        Bytes::from("Consumer disconnected"),
-                    ),
-                    Err(_) => (
-                        StatusCode::REQUEST_TIMEOUT,
-                        Bytes::from("Request timed out"),
-                    ),
-                };
+                return (StatusCode::OK, Bytes::new());
             }
             Err(_) => {
                 // Consumer disconnected before we could send - fall through to wait
