@@ -106,8 +106,8 @@ curl -X POST http://localhost:8080/link/my-channel \
 ```
 
 **Responses:**
-- `200 OK` - Consumer received the message
-- `408 Request Timeout` - No consumer arrived in time
+- `200 OK` - Consumer received the message (confirmed via two-phase ACK)
+- `408 Request Timeout` - No consumer arrived, or consumer disconnected before receiving
 - `503 Service Unavailable` - Server at capacity (max pending reached)
 
 ### GET `/link/{id}` or `/link2/{id}`
@@ -143,13 +143,18 @@ OS, the HTTP response never actually arrives on the device. From the relay's
 perspective, the value was consumed successfully. But the mobile app never
 received it—and when the user reopens the app, the value is gone.
 
-`/link2` solves this with two changes:
+`/link2` solves this with three mechanisms:
 
 1. **Caching**: After a successful delivery, the value is cached for 5 minutes.
    If the mobile app was killed, it can retry and still receive the value.
 
 2. **Shorter timeout**: The 25-second timeout stays safely under typical proxy
    timeouts (nginx, Cloudflare often use 30s), preventing unexpected connection drops.
+
+3. **Two-phase acknowledgment**: The producer only receives `200 OK` after the
+   consumer has actually received the response body. If the consumer disconnects
+   mid-transfer, the producer gets `408` and can retry. This prevents the relay
+   from reporting success when the data never reached the client.
 
 ## Client Implementation Patterns
 
@@ -211,8 +216,10 @@ async function produceToRelay(channelId, data) {
   have 30s timeouts. The 25s link2 timeout stays safely under this limit.
 - **Cache enables resilience**: Once delivered, the value is cached for 5 min.
   If a consumer's connection drops, they can retry and still receive it.
-- **408 is not an error**: It just means the counterpart hasn't arrived yet.
-  Keep trying until they do.
+- **Two-phase ACK ensures correctness**: Producers only get `200 OK` after the
+  consumer actually received the data. A `408` means retry is safe and necessary.
+- **408 is not an error**: It just means the counterpart hasn't arrived yet,
+  or disconnected before completing the transfer. Keep trying until success.
 
 ## Development
 

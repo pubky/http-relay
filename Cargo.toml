@@ -13,6 +13,7 @@ categories = ["web-programming"]
 [dependencies]
 anyhow = "1.0.100"
 axum = "0.8.8"
+http-body = "1.0"
 axum-server = "0.8.0"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3.31"
@@ -29,3 +30,4 @@ path = "src/main.rs"
 
 [dev-dependencies]
 axum-test = "18.7.0"
+http-body-util = "0.1"

@@ -13,6 +13,24 @@ pub struct Message {
     pub content_type: Option<String>,
 }
 
+/// A message with an ack channel for two-phase acknowledgment.
+/// The receiver uses ack_sender in their AckBody to confirm delivery.
+pub struct MessageWithAck {
+    pub body: Bytes,
+    pub content_type: Option<String>,
+    pub ack_sender: oneshot::Sender<()>,
+}
+
+impl std::fmt::Debug for MessageWithAck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MessageWithAck")
+            .field("body", &self.body)
+            .field("content_type", &self.content_type)
+            .field("ack_sender", &"<oneshot::Sender>")
+            .finish()
+    }
+}
+
 /// A cached value with its expiration time.
 pub struct CachedValue {
     /// The cached payload.
@@ -87,7 +105,7 @@ impl WaitingList {
         id: &str,
         body: Bytes,
         content_type: Option<String>,
-    ) -> Result<oneshot::Receiver<()>, LimitError> {
+    ) -> Result<oneshot::Receiver<oneshot::Receiver<()>>, LimitError> {
         if self.pending_count() >= self.max_pending {
             return Err(LimitError::PendingLimitReached);
         }
@@ -100,7 +118,10 @@ impl WaitingList {
         self.pending_consumers.remove(id)
     }
 
-    pub fn insert_consumer(&mut self, id: &str) -> Result<oneshot::Receiver<Message>, LimitError> {
+    pub fn insert_consumer(
+        &mut self,
+        id: &str,
+    ) -> Result<oneshot::Receiver<MessageWithAck>, LimitError> {
         if self.pending_count() >= self.max_pending {
             return Err(LimitError::PendingLimitReached);
         }
@@ -177,32 +198,37 @@ pub struct WaitingProducer {
     pub body: Bytes,
     /// The content type of the payload.
     pub content_type: Option<String>,
-    /// The sender to notify the producer that the request has been resolved.
-    pub completion: oneshot::Sender<()>,
+    /// Sender for consumer to send ack_receiver to producer.
+    /// Producer will await the ack_receiver to confirm delivery.
+    pub ack_receiver_sender: oneshot::Sender<oneshot::Receiver<()>>,
 }
 
 impl WaitingProducer {
-    fn new(body: Bytes, content_type: Option<String>) -> (Self, oneshot::Receiver<()>) {
-        let (completion_sender, completion_receiver) = oneshot::channel();
+    fn new(
+        body: Bytes,
+        content_type: Option<String>,
+    ) -> (Self, oneshot::Receiver<oneshot::Receiver<()>>) {
+        let (ack_receiver_sender, ack_receiver_receiver) = oneshot::channel();
         (
             Self {
                 body,
                 content_type,
-                completion: completion_sender,
+                ack_receiver_sender,
             },
-            completion_receiver,
+            ack_receiver_receiver,
         )
     }
 }
 
 /// A consumer that is waiting for a producer to send data.
 pub struct WaitingConsumer {
-    /// The sender to notify the consumer that the request has been resolved.
-    pub message_sender: oneshot::Sender<Message>,
+    /// The sender to send message with ack channel to the consumer.
+    /// The consumer will use ack_sender in their AckBody to confirm delivery.
+    pub message_sender: oneshot::Sender<MessageWithAck>,
 }
 
 impl WaitingConsumer {
-    fn new() -> (Self, oneshot::Receiver<Message>) {
+    fn new() -> (Self, oneshot::Receiver<MessageWithAck>) {
         let (message_sender, message_receiver) = oneshot::channel();
         (Self { message_sender }, message_receiver)
     }
