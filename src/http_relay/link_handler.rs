@@ -42,7 +42,7 @@ impl LinkConfig {
     pub fn standard(config: &Config) -> Self {
         Self {
             caching_enabled: false,
-            timeout: config.request_timeout,
+            timeout: config.link_timeout,
         }
     }
 
@@ -252,9 +252,9 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_request_timeout() {
+        async fn test_link_timeout() {
             let config = Config {
-                request_timeout: Duration::from_millis(50),
+                link_timeout: Duration::from_millis(50),
                 ..Config::default()
             };
             let (server, state) = HttpRelay::create_test_server(config);
@@ -277,7 +277,7 @@ mod tests {
         async fn test_no_caching() {
             let config = Config {
                 cache_ttl: Duration::from_secs(5),
-                request_timeout: Duration::from_millis(100),
+                link_timeout: Duration::from_millis(100),
                 ..Config::default()
             };
             let (server, state) = HttpRelay::create_test_server(config);

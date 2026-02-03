@@ -25,8 +25,8 @@ use url::Url;
 use super::waiting_list::WaitingList;
 use super::{link, link2};
 
-/// The timeout for a request to be considered unused.
-const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// The default timeout for link (v1) endpoints.
+const DEFAULT_LINK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// The default time-to-live for cached values after first consumer retrieves them.
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -63,7 +63,8 @@ impl AppState {
 pub(crate) struct Config {
     pub bind_address: IpAddr,
     pub http_port: u16,
-    pub request_timeout: Duration,
+    /// Timeout for link (v1) endpoints.
+    pub link_timeout: Duration,
     /// How long to keep values cached after the first consumer retrieves them.
     pub cache_ttl: Duration,
     /// Timeout for link2 endpoints (shorter to avoid proxy timeouts).
@@ -81,7 +82,7 @@ impl Default for Config {
         Self {
             bind_address: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             http_port: 0,
-            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            link_timeout: DEFAULT_LINK_TIMEOUT,
             cache_ttl: DEFAULT_CACHE_TTL,
             link2_timeout: DEFAULT_LINK2_TIMEOUT,
             max_body_size: DEFAULT_MAX_BODY_SIZE,
