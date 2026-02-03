@@ -160,12 +160,20 @@ pub async fn post_handler(
     .await
 }
 
+/// Deprecated: Use `/link2/` instead.
+///
+/// The `/link/` endpoint lacks caching support and has a longer default timeout
+/// that can cause issues with reverse proxies. Use `/link2/` for new integrations.
 pub mod link {
     use super::*;
 
     pub async fn get_handler(path: Path<String>, State(state): State<AppState>) -> Response {
         let config = LinkConfig::standard(&state.config);
-        super::get_handler(path, State(state), config).await
+        let mut response = super::get_handler(path, State(state), config).await;
+        response
+            .headers_mut()
+            .insert("Deprecation", "true".parse().unwrap());
+        response
     }
 
     pub async fn post_handler(
@@ -173,9 +181,16 @@ pub mod link {
         State(state): State<AppState>,
         headers: HeaderMap,
         body: Bytes,
-    ) -> impl IntoResponse {
+    ) -> Response {
         let config = LinkConfig::standard(&state.config);
-        super::post_handler(path, State(state), headers, body, config).await
+        let mut response =
+            super::post_handler(path, State(state), headers, body, config)
+                .await
+                .into_response();
+        response
+            .headers_mut()
+            .insert("Deprecation", "true".parse().unwrap());
+        response
     }
 }
 

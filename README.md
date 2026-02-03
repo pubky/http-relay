@@ -26,8 +26,8 @@ clients with caching and shorter timeouts.
 
 - **Async producer/consumer model** - Producers POST data, consumers GET it
 - **Two endpoint variants:**
-  - `/link/{id}` - Standard relay (10 min timeout)
-  - `/link2/{id}` - Mobile-friendly with caching (25s timeout, 5 min cache TTL)
+  - `/link/{id}` - **Deprecated.** Standard relay (10 min timeout)
+  - `/link2/{id}` - **Recommended.** Mobile-friendly with caching (25s timeout, 5 min cache TTL)
 - **Mobile resilience** - Cached responses allow retries after connection drops
 - **Content-Type preservation** - Forwards producer's Content-Type to consumer
 - **Configurable timeouts and caching**
@@ -127,13 +127,13 @@ curl http://localhost:8080/link/my-channel
 
 | Aspect | `/link/{id}` | `/link2/{id}` |
 |--------|--------------|---------------|
+| Status | **Deprecated** | **Recommended** |
 | Timeout | 10 minutes | 25 seconds |
 | Caching | No | Yes (5 min TTL) |
-| Use case | Backwards compatibility | **Recommended** |
 
-**Use `/link2` for new integrations.** It handles proxy timeouts gracefully and
-supports retries via caching. The `/link` endpoint remains available for
-backwards compatibility with existing clients.
+**Use `/link2` for all integrations.** It handles proxy timeouts gracefully and
+supports retries via caching. The `/link` endpoint is deprecated and remains
+only for backwards compatibility with existing clients.
 
 ### Why Link2 Exists
 

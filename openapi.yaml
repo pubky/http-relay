@@ -10,7 +10,7 @@ info:
 
     **Two endpoint variants are available:**
     - `/link2/{id}` - **Recommended.** Short timeout (25s) with caching (5 min TTL)
-    - `/link/{id}` - Backwards compatibility only (10 min timeout, no caching)
+    - `/link/{id}` - **Deprecated.** (10 min timeout, no caching)
 
     **Use `/link2` for new integrations.** The original `/link` endpoint has a
     problem on mobile devices: when an app gets backgrounded or killed while
@@ -29,9 +29,10 @@ servers:
 paths:
   /link/{id}:
     get:
-      summary: Consume a message (legacy)
+      summary: Consume a message (deprecated)
+      deprecated: true
       description: |
-        Legacy endpoint for backwards compatibility. Use `/link2` for new integrations.
+        **Deprecated.** Use `/link2` for all integrations.
 
         Consumer retrieves a message from the channel. Blocks until a producer
         sends data or the timeout (10 minutes) is reached.
@@ -47,9 +48,10 @@ paths:
           $ref: '#/components/responses/Timeout'
 
     post:
-      summary: Produce a message (legacy)
+      summary: Produce a message (deprecated)
+      deprecated: true
       description: |
-        Legacy endpoint for backwards compatibility. Use `/link2` for new integrations.
+        **Deprecated.** Use `/link2` for all integrations.
 
         Producer sends a message to the channel. Blocks until a consumer
         retrieves the data or the timeout (10 minutes) is reached.
@@ -172,6 +174,6 @@ components:
 
 tags:
   - name: link
-    description: Legacy relay endpoints for backwards compatibility (10 min timeout, no caching)
+    description: Deprecated relay endpoints (10 min timeout, no caching). Use link2 instead.
   - name: link2
     description: Recommended endpoints with retry support (25s timeout, 5 min cache TTL)

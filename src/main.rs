@@ -73,7 +73,7 @@ async fn main() -> Result<()> {
     );
     tracing::info!(
         link = %relay.local_link_url(),
-        "Link endpoint available at /link/{{id}} and /link2/{{id}}"
+        "Endpoints: /link2/{{id}} (recommended), /link/{{id}} (deprecated)"
     );
 
     tokio::signal::ctrl_c().await?;
