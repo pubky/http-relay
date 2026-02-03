@@ -183,10 +183,9 @@ pub mod link {
         body: Bytes,
     ) -> Response {
         let config = LinkConfig::standard(&state.config);
-        let mut response =
-            super::post_handler(path, State(state), headers, body, config)
-                .await
-                .into_response();
+        let mut response = super::post_handler(path, State(state), headers, body, config)
+            .await
+            .into_response();
         response
             .headers_mut()
             .insert("Deprecation", "true".parse().unwrap());
