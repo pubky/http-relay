@@ -212,7 +212,7 @@ impl HttpRelay {
         });
 
         // Spawn background task to clean up expired cache entries
-        let cleanup_interval = Duration::from_secs(1);
+        let cleanup_interval = Duration::from_secs(15);
         let pending_list = app_state.pending_list.clone();
         tokio::spawn(async move {
             loop {
