@@ -402,7 +402,7 @@ mod tests {
                 .is_some());
 
             // Wait for cache to expire
-            tokio::time::sleep(Duration::from_millis(1500)).await;
+            tokio::time::sleep(Duration::from_millis(60)).await;
 
             // Value should be expired (get_cached returns None)
             assert!(state
