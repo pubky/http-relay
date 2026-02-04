@@ -176,14 +176,44 @@ curl http://localhost:8080/inbox/my-channel/await
 
 ### Typical Flow
 
-1. **Producer** POSTs message to `/inbox/{id}` - returns 200 immediately
-2. **Producer** calls GET `/inbox/{id}/await` - blocks waiting for ACK
-3. **Consumer** GETs message from `/inbox/{id}` - waits if needed, receives payload
-4. **Consumer** DELETEs `/inbox/{id}` - acknowledges receipt
-5. **Producer's** /await call returns 200 - delivery confirmed
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant R as Relay
+    participant C as Consumer
 
-The consumer can call GET before the producer posts - it will wait up to 25s for
-the message to arrive. No polling loop needed.
+    P->>R: POST /inbox/{id}
+    activate R
+    Note right of R: Store in SQLite<br/>acked = false
+    R-->>P: 200 OK
+    deactivate R
+
+    P->>R: GET /inbox/{id}/await
+    activate R
+    Note right of R: Subscribe to ACK<br/>(blocks up to 25s)
+
+    C->>R: GET /inbox/{id}
+    R-->>C: 200 OK + message
+
+    C->>R: DELETE /inbox/{id}
+    activate R
+    Note right of R: Set acked = true<br/>Clear message body<br/>Notify ACK waiters
+    R-->>C: 200 OK
+    deactivate R
+
+    R-->>P: 200 OK (ACKed)
+    deactivate R
+```
+
+**Step by step:**
+
+1. **Producer** POSTs message to `/inbox/{id}` — returns 200 immediately
+2. **Producer** calls GET `/inbox/{id}/await` — blocks waiting for ACK
+3. **Consumer** GETs message from `/inbox/{id}` — receives payload (or waits up to 25s if not yet available)
+4. **Consumer** DELETEs `/inbox/{id}` — acknowledges receipt
+5. **Producer's** `/await` call returns 200 — delivery confirmed
+
+The consumer can call GET before the producer posts—it will long-poll up to 25s for the message to arrive. No polling loop needed.
 
 ### Link Endpoint (Legacy)
 
