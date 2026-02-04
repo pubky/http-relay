@@ -18,9 +18,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use super::response::{build_response, validate_id_length};
 #[cfg(test)]
 use super::response::MAX_ID_LENGTH;
+use super::response::{build_response, validate_id_length};
 use super::waiting_list::{GetOrSubscribeResult, LimitError, Message};
 use super::AppState;
 
@@ -112,7 +112,10 @@ pub async fn post_handler(
             Ok(rx) => rx,
             Err(None) => {
                 // Entry was immediately evicted (shouldn't happen normally)
-                return (StatusCode::SERVICE_UNAVAILABLE, Bytes::from("Server at capacity"))
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Bytes::from("Server at capacity"),
+                )
                     .into_response();
             }
             Err(Some(LimitError::WaiterLimitReached)) => {
@@ -132,7 +135,10 @@ pub async fn post_handler(
             // Entry expired or was evicted
             (StatusCode::NOT_FOUND, Bytes::from("Entry expired"))
         }
-        Err(_) => (StatusCode::REQUEST_TIMEOUT, Bytes::from("Request timed out")),
+        Err(_) => (
+            StatusCode::REQUEST_TIMEOUT,
+            Bytes::from("Request timed out"),
+        ),
     };
 
     let mut response = result.into_response();

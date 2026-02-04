@@ -44,9 +44,7 @@ impl EntryRepository {
     /// Returns error if database connection or schema creation fails.
     pub fn new(path: Option<&Path>, max_entries: usize) -> Result<Self> {
         let connection = match path {
-            Some(path) => {
-                Connection::open(path).context("Failed to open SQLite database file")?
-            }
+            Some(path) => Connection::open(path).context("Failed to open SQLite database file")?,
             None => {
                 Connection::open_in_memory().context("Failed to open in-memory SQLite database")?
             }
@@ -219,10 +217,7 @@ impl EntryRepository {
         let current_time = Self::current_timestamp_millis();
 
         let rows_deleted = connection
-            .execute(
-                "DELETE FROM entries WHERE expires_at < ?1",
-                [current_time],
-            )
+            .execute("DELETE FROM entries WHERE expires_at < ?1", [current_time])
             .context("Failed to cleanup expired entries")?;
 
         Ok(rows_deleted)
@@ -365,14 +360,22 @@ mod tests {
         let repository = EntryRepository::new(None, 3).expect("Failed to create repository");
         let expires_at = EntryRepository::current_timestamp_millis() + 3_600_000;
 
-        repository.insert("id1", b"body1", None, expires_at).unwrap();
-        repository.insert("id2", b"body2", None, expires_at).unwrap();
-        repository.insert("id3", b"body3", None, expires_at).unwrap();
+        repository
+            .insert("id1", b"body1", None, expires_at)
+            .unwrap();
+        repository
+            .insert("id2", b"body2", None, expires_at)
+            .unwrap();
+        repository
+            .insert("id3", b"body3", None, expires_at)
+            .unwrap();
 
         assert_eq!(repository.count().unwrap(), 3);
 
         // Insert fourth entry, should evict id1 (oldest)
-        repository.insert("id4", b"body4", None, expires_at).unwrap();
+        repository
+            .insert("id4", b"body4", None, expires_at)
+            .unwrap();
 
         assert_eq!(repository.count().unwrap(), 3);
         assert!(repository.get("id1").unwrap().is_none());
@@ -407,7 +410,9 @@ mod tests {
         let expires_at = EntryRepository::current_timestamp_millis() + 3_600_000;
 
         // Fill repository to capacity: A is oldest, then B, then C
-        repository.insert("A", b"original-A", None, expires_at).unwrap();
+        repository
+            .insert("A", b"original-A", None, expires_at)
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1)); // Ensure distinct timestamps
         repository.insert("B", b"body-B", None, expires_at).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -416,15 +421,26 @@ mod tests {
         assert_eq!(repository.count().unwrap(), 3);
 
         // Update entry A (the oldest) with new data - should NOT evict A
-        repository.insert("A", b"updated-A", None, expires_at).unwrap();
+        repository
+            .insert("A", b"updated-A", None, expires_at)
+            .unwrap();
 
         // All three entries should still exist
         assert_eq!(repository.count().unwrap(), 3);
 
-        let entry_a = repository.get("A").expect("Failed to get A").expect("A should exist");
+        let entry_a = repository
+            .get("A")
+            .expect("Failed to get A")
+            .expect("A should exist");
         assert_eq!(entry_a.message_body, Some(b"updated-A".to_vec()));
 
-        assert!(repository.get("B").unwrap().is_some(), "B should still exist");
-        assert!(repository.get("C").unwrap().is_some(), "C should still exist");
+        assert!(
+            repository.get("B").unwrap().is_some(),
+            "B should still exist"
+        );
+        assert!(
+            repository.get("C").unwrap().is_some(),
+            "C should still exist"
+        );
     }
 }

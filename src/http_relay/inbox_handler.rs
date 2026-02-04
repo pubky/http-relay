@@ -17,9 +17,9 @@ use axum::{
     response::IntoResponse,
 };
 
-use super::response::{build_response, validate_id_length};
 #[cfg(test)]
 use super::response::MAX_ID_LENGTH;
+use super::response::{build_response, validate_id_length};
 use super::waiting_list::{GetOrSubscribeResult, LimitError, Message};
 use super::AppState;
 
@@ -75,9 +75,7 @@ pub async fn get_handler(
         Ok(GetOrSubscribeResult::Waiting(receiver)) => {
             match tokio::time::timeout(state.config.inbox_timeout, receiver).await {
                 Ok(Ok(msg)) => build_response(StatusCode::OK, msg.body, msg.content_type),
-                Ok(Err(_)) => {
-                    build_response(StatusCode::NOT_FOUND, "Entry expired".into(), None)
-                }
+                Ok(Err(_)) => build_response(StatusCode::NOT_FOUND, "Entry expired".into(), None),
                 Err(_) => build_response(
                     StatusCode::REQUEST_TIMEOUT,
                     "Request timed out".into(),

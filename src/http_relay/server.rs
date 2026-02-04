@@ -57,10 +57,7 @@ impl AppState {
             tracing::debug!("Using in-memory storage (no persistence)");
         }
 
-        let repository = EntryRepository::new(
-            config.persist_db.as_deref(),
-            config.max_entries,
-        )?;
+        let repository = EntryRepository::new(config.persist_db.as_deref(), config.max_entries)?;
         let waiting_list = WaitingList::new(repository);
         Ok(Self {
             config,

@@ -207,7 +207,10 @@ impl WaitingList {
         }
 
         let (tx, rx) = oneshot::channel();
-        let waiters = self.waiters.entry(id.to_string()).or_insert_with(Waiters::new);
+        let waiters = self
+            .waiters
+            .entry(id.to_string())
+            .or_insert_with(Waiters::new);
         if waiters.add_ack_waiter(tx) {
             Ok(rx)
         } else {
@@ -241,7 +244,10 @@ impl WaitingList {
 
         // No message - subscribe for notification
         let (tx, rx) = oneshot::channel();
-        let waiters = self.waiters.entry(id.to_string()).or_insert_with(Waiters::new);
+        let waiters = self
+            .waiters
+            .entry(id.to_string())
+            .or_insert_with(Waiters::new);
 
         if waiters.add_message_waiter(tx) {
             // Store TTL for use when message arrives (waiters exist before entry)
@@ -312,8 +318,8 @@ impl WaitingList {
 impl WaitingList {
     /// Creates a WaitingList with an in-memory repository for testing.
     pub fn new_in_memory(max_entries: usize) -> Self {
-        let repository = EntryRepository::new(None, max_entries)
-            .expect("Failed to create in-memory repository");
+        let repository =
+            EntryRepository::new(None, max_entries).expect("Failed to create in-memory repository");
         Self::new(repository)
     }
 
@@ -391,7 +397,8 @@ mod tests {
         };
 
         // Store message - should notify the waiter
-        list.store("id1".to_string(), make_message("overwrite"), ttl).unwrap();
+        list.store("id1".to_string(), make_message("overwrite"), ttl)
+            .unwrap();
 
         let received = rx.await.expect("should receive message");
         assert_eq!(received.body, Bytes::from("overwrite"));
@@ -402,11 +409,13 @@ mod tests {
         let mut list = create_test_list();
         let ttl = Duration::from_secs(60);
 
-        list.store("id1".to_string(), make_message("first"), ttl).unwrap();
+        list.store("id1".to_string(), make_message("first"), ttl)
+            .unwrap();
         let ack_rx = list.subscribe_ack("id1").expect("should subscribe");
 
         // Overwrite the entry
-        list.store("id1".to_string(), make_message("second"), ttl).unwrap();
+        list.store("id1".to_string(), make_message("second"), ttl)
+            .unwrap();
 
         // Old ack waiter should be dropped (receive error)
         let result = ack_rx.await;
@@ -420,7 +429,8 @@ mod tests {
         let mut list = create_test_list();
         let ttl = Duration::from_secs(60);
 
-        list.store("id1".to_string(), make_message("test"), ttl).unwrap();
+        list.store("id1".to_string(), make_message("test"), ttl)
+            .unwrap();
 
         for _ in 0..MAX_WAITERS_PER_ENTRY {
             let result = list.subscribe_ack("id1");
@@ -459,7 +469,8 @@ mod tests {
         let mut list = create_test_list();
         let ttl = Duration::from_secs(60);
 
-        list.store("id1".to_string(), make_message("test"), ttl).unwrap();
+        list.store("id1".to_string(), make_message("test"), ttl)
+            .unwrap();
 
         assert_eq!(list.is_acked("id1"), Some(false));
     }
@@ -469,7 +480,8 @@ mod tests {
         let mut list = create_test_list();
         let ttl = Duration::from_secs(60);
 
-        list.store("id1".to_string(), make_message("test"), ttl).unwrap();
+        list.store("id1".to_string(), make_message("test"), ttl)
+            .unwrap();
         let ack_result = list.ack("id1");
 
         assert!(ack_result, "ack should succeed");
@@ -481,7 +493,8 @@ mod tests {
         let mut list = create_test_list();
         let ttl = Duration::from_secs(60);
 
-        list.store("id1".to_string(), make_message("test"), ttl).unwrap();
+        list.store("id1".to_string(), make_message("test"), ttl)
+            .unwrap();
         let rx = list.subscribe_ack("id1").expect("should subscribe");
 
         list.ack("id1");
@@ -495,12 +508,17 @@ mod tests {
         let mut list = create_test_list();
         let short_ttl = Duration::from_millis(10);
 
-        list.store("id1".to_string(), make_message("test"), short_ttl).unwrap();
+        list.store("id1".to_string(), make_message("test"), short_ttl)
+            .unwrap();
 
         sleep(Duration::from_millis(20)).await;
 
         assert!(!list.ack("id1"), "ack should fail for expired entry");
-        assert_eq!(list.is_acked("id1"), None, "is_acked should be None for expired");
+        assert_eq!(
+            list.is_acked("id1"),
+            None,
+            "is_acked should be None for expired"
+        );
     }
 
     #[test]
@@ -518,7 +536,8 @@ mod tests {
         let mut list = create_test_list();
         let ttl = Duration::from_secs(60);
 
-        list.store("id1".to_string(), make_message("existing"), ttl).unwrap();
+        list.store("id1".to_string(), make_message("existing"), ttl)
+            .unwrap();
 
         let result = list.get_or_subscribe("id1", ttl).expect("should succeed");
 
@@ -561,7 +580,8 @@ mod tests {
             GetOrSubscribeResult::Message(_) => panic!("should be waiting"),
         };
 
-        list.store("id1".to_string(), make_message("arrived"), ttl).unwrap();
+        list.store("id1".to_string(), make_message("arrived"), ttl)
+            .unwrap();
 
         let msg = rx.await.expect("should receive message");
         assert_eq!(msg.body, Bytes::from("arrived"));
@@ -573,11 +593,14 @@ mod tests {
         let short_ttl = Duration::from_millis(10);
         let long_ttl = Duration::from_secs(60);
 
-        list.store("id1".to_string(), make_message("expired"), short_ttl).unwrap();
+        list.store("id1".to_string(), make_message("expired"), short_ttl)
+            .unwrap();
 
         sleep(Duration::from_millis(20)).await;
 
-        let result = list.get_or_subscribe("id1", long_ttl).expect("should succeed");
+        let result = list
+            .get_or_subscribe("id1", long_ttl)
+            .expect("should succeed");
 
         match result {
             GetOrSubscribeResult::Message(_) => {
@@ -598,7 +621,9 @@ mod tests {
         let ttl = Duration::from_secs(60);
 
         // Consumer subscribes - no entry in DB yet
-        let result = list.get_or_subscribe("consumer-first", ttl).expect("should succeed");
+        let result = list
+            .get_or_subscribe("consumer-first", ttl)
+            .expect("should succeed");
         let rx = match result {
             GetOrSubscribeResult::Waiting(rx) => rx,
             GetOrSubscribeResult::Message(_) => panic!("should be waiting"),
@@ -608,9 +633,12 @@ mod tests {
         list.cleanup_expired();
 
         // Producer sends message - waiter should still receive it
-        list.store("consumer-first".to_string(), make_message("delayed"), ttl).unwrap();
+        list.store("consumer-first".to_string(), make_message("delayed"), ttl)
+            .unwrap();
 
-        let msg = rx.await.expect("waiter should not have been removed by cleanup");
+        let msg = rx
+            .await
+            .expect("waiter should not have been removed by cleanup");
         assert_eq!(msg.body, Bytes::from("delayed"));
     }
 
@@ -620,7 +648,8 @@ mod tests {
         let short_ttl = Duration::from_millis(10);
 
         // Store message, subscribe for ack
-        list.store("will-expire".to_string(), make_message("test"), short_ttl).unwrap();
+        list.store("will-expire".to_string(), make_message("test"), short_ttl)
+            .unwrap();
         let ack_rx = list.subscribe_ack("will-expire").expect("should subscribe");
 
         // Wait for expiry
@@ -630,7 +659,10 @@ mod tests {
         list.cleanup_expired();
 
         // Ack waiter should be dropped (sender removed)
-        assert!(ack_rx.await.is_err(), "waiter should be removed for expired entry");
+        assert!(
+            ack_rx.await.is_err(),
+            "waiter should be removed for expired entry"
+        );
     }
 
     #[tokio::test]
@@ -639,7 +671,9 @@ mod tests {
         let ttl = Duration::from_secs(60);
 
         // Subscribe but immediately drop the receiver (simulates timeout)
-        let result = list.get_or_subscribe("dropped-receiver", ttl).expect("should succeed");
+        let result = list
+            .get_or_subscribe("dropped-receiver", ttl)
+            .expect("should succeed");
         match result {
             GetOrSubscribeResult::Waiting(rx) => drop(rx), // Receiver dropped
             GetOrSubscribeResult::Message(_) => panic!("should be waiting"),
