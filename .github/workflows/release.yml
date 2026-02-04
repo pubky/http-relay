@@ -139,6 +139,9 @@ jobs:
         env:
           NEXT_PUBLIC_RELAY_URL: https://httprelay.pubky.app
 
+      - name: Add .nojekyll
+        run: touch demo/out/.nojekyll
+
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
