@@ -1,18 +1,46 @@
 //! Shared response utilities for HTTP relay endpoints.
-
-use std::future::Future;
-use std::time::Duration;
+//!
+//! # Response Patterns
+//!
+//! Handlers should use these patterns consistently:
+//!
+//! - **`build_response()`**: Use when forwarding stored messages that may have
+//!   a Content-Type header (e.g., GET /inbox/{id}, GET /link/{id}).
+//!
+//! - **`(StatusCode, Bytes)`**: Use for simple responses without Content-Type
+//!   (e.g., POST success, DELETE success/failure, errors, ACK status).
+//!
+//! This keeps simple cases simple while providing Content-Type forwarding
+//! only where needed.
 
 use axum::{
     body::Bytes,
     http::{header, StatusCode},
     response::{IntoResponse, Response},
 };
-use tokio::sync::oneshot;
 
-use super::waiting_list::Message;
+/// Maximum allowed length for IDs (in bytes).
+/// 256 bytes accommodates typical ID patterns (UUIDs are 36 chars, base64-encoded
+/// 256-bit keys are 44 chars) while preventing DoS via oversized HashMap keys.
+pub const MAX_ID_LENGTH: usize = 256;
+
+/// Validate that an ID doesn't exceed the maximum length.
+/// Returns `Err` with a BAD_REQUEST response if the ID is too long.
+pub fn validate_id_length(id: &str, id_name: &str) -> Result<(), (StatusCode, Bytes)> {
+    if id.len() > MAX_ID_LENGTH {
+        Err((
+            StatusCode::BAD_REQUEST,
+            Bytes::from(format!("{} too long", id_name)),
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 /// Build a response with optional Content-Type header.
+///
+/// Use this for message bodies that may have a stored Content-Type.
+/// For simple responses (errors, ACKs), prefer `(StatusCode, Bytes)` tuples.
 pub fn build_response(status: StatusCode, body: Bytes, content_type: Option<String>) -> Response {
     let mut response = (status, body).into_response();
     if let Some(ct) = content_type {
@@ -21,55 +49,4 @@ pub fn build_response(status: StatusCode, body: Bytes, content_type: Option<Stri
         }
     }
     response
-}
-
-/// Awaits a message from the producer with a timeout.
-/// On channel close, returns NOT_FOUND.
-/// On timeout, calls the async cleanup function and returns REQUEST_TIMEOUT.
-pub async fn await_consumer_message<F, Fut>(
-    receiver: oneshot::Receiver<Message>,
-    timeout: Duration,
-    on_timeout: F,
-) -> Response
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = ()>,
-{
-    match tokio::time::timeout(timeout, receiver).await {
-        Ok(Ok(msg)) => build_response(StatusCode::OK, msg.body, msg.content_type),
-        Ok(Err(_)) => build_response(StatusCode::NOT_FOUND, "Not Found".into(), None),
-        Err(_) => {
-            on_timeout().await;
-            build_response(
-                StatusCode::REQUEST_TIMEOUT,
-                "Request timed out".into(),
-                None,
-            )
-        }
-    }
-}
-
-/// Awaits completion signal from the consumer with a timeout.
-/// On success, returns OK with empty body.
-/// On timeout, calls cleanup and returns REQUEST_TIMEOUT.
-pub async fn await_producer_completion<F, Fut>(
-    receiver: oneshot::Receiver<()>,
-    timeout: Duration,
-    on_timeout: F,
-) -> (StatusCode, Bytes)
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = ()>,
-{
-    match tokio::time::timeout(timeout, receiver).await {
-        Ok(Ok(())) => (StatusCode::OK, Bytes::new()),
-        Ok(Err(_)) => {
-            // Channel closed - consumer took the message
-            (StatusCode::OK, Bytes::new())
-        }
-        Err(_) => {
-            on_timeout().await;
-            (StatusCode::REQUEST_TIMEOUT, "Request timed out".into())
-        }
-    }
 }

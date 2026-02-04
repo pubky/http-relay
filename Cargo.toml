@@ -17,12 +17,12 @@ http-body = "1.0"
 axum-server = "0.8.0"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3.31"
-lru = "0.16.3"
 tokio = { version = "1.49.0", features = ["full"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2.5.8"
 tower-http = { version = "0.6.8", features = ["cors", "trace"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [[bin]]
 name = "http-relay"

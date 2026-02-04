@@ -32,5 +32,4 @@ Cargo.lock
 *.bak
 *.tmp
 
-
-.claude/
+cache.sqlite*

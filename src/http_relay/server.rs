@@ -9,6 +9,7 @@
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
+    path::PathBuf,
     sync::Arc,
     time::Duration,
 };
@@ -22,26 +23,24 @@ use tokio::sync::Mutex;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use url::Url;
 
+use super::persistence::EntryRepository;
 use super::waiting_list::WaitingList;
-use super::{link, link2};
+use super::{inbox, link};
 
-/// The default timeout for link (v1) endpoints.
+/// The default timeout for link endpoints (synchronous handoff).
 const DEFAULT_LINK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
-/// The default time-to-live for cached values after first consumer retrieves them.
-const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+/// The default timeout for inbox long-poll endpoints (shorter to avoid proxy timeouts).
+const DEFAULT_INBOX_TIMEOUT: Duration = Duration::from_secs(25);
 
-/// The default timeout for link2 endpoints (shorter to avoid proxy timeouts like nginx).
-const DEFAULT_LINK2_TIMEOUT: Duration = Duration::from_secs(25);
+/// The default time-to-live for inbox messages.
+const DEFAULT_INBOX_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
-/// Default maximum request body size (10KB).
-const DEFAULT_MAX_BODY_SIZE: usize = 10 * 1024;
+/// Default maximum request body size (2KB).
+const DEFAULT_MAX_BODY_SIZE: usize = 2 * 1024;
 
-/// Default maximum pending requests (producers + consumers).
-const DEFAULT_MAX_PENDING: usize = 10_000;
-
-/// Default maximum cached entries.
-const DEFAULT_MAX_CACHE: usize = 10_000;
+/// Default maximum entries in the unified LRU cache.
+const DEFAULT_MAX_ENTRIES: usize = 10_000;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -50,12 +49,23 @@ pub(crate) struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: Config) -> Self {
-        let waiting_list = WaitingList::new(config.max_pending, config.max_cache);
-        Self {
+    /// Creates a new AppState. Returns error if persistence initialization fails.
+    pub fn new(config: Config) -> anyhow::Result<Self> {
+        if let Some(path) = &config.persist_db {
+            tracing::info!(path = %path.display(), "Persistence enabled with SQLite");
+        } else {
+            tracing::debug!("Using in-memory storage (no persistence)");
+        }
+
+        let repository = EntryRepository::new(
+            config.persist_db.as_deref(),
+            config.max_entries,
+        )?;
+        let waiting_list = WaitingList::new(repository);
+        Ok(Self {
             config,
             pending_list: Arc::new(Mutex::new(waiting_list)),
-        }
+        })
     }
 }
 
@@ -63,18 +73,19 @@ impl AppState {
 pub(crate) struct Config {
     pub bind_address: IpAddr,
     pub http_port: u16,
-    /// Timeout for link (v1) endpoints.
+    /// Timeout for link endpoints (synchronous handoff wait time).
     pub link_timeout: Duration,
-    /// How long to keep values cached after the first consumer retrieves them.
-    pub cache_ttl: Duration,
-    /// Timeout for link2 endpoints (shorter to avoid proxy timeouts).
-    pub link2_timeout: Duration,
+    /// Timeout for inbox long-poll endpoints (shorter to avoid proxy timeouts).
+    pub inbox_timeout: Duration,
+    /// How long inbox messages persist before expiring.
+    pub inbox_cache_ttl: Duration,
     /// Maximum request body size in bytes.
     pub max_body_size: usize,
-    /// Maximum pending requests (producers + consumers combined).
-    pub max_pending: usize,
-    /// Maximum cached entries.
-    pub max_cache: usize,
+    /// Maximum entries in the waiting list.
+    pub max_entries: usize,
+    /// Path to SQLite database for persistent storage.
+    /// If None, uses in-memory storage (data lost on restart).
+    pub persist_db: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -83,11 +94,11 @@ impl Default for Config {
             bind_address: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             http_port: 0,
             link_timeout: DEFAULT_LINK_TIMEOUT,
-            cache_ttl: DEFAULT_CACHE_TTL,
-            link2_timeout: DEFAULT_LINK2_TIMEOUT,
+            inbox_timeout: DEFAULT_INBOX_TIMEOUT,
+            inbox_cache_ttl: DEFAULT_INBOX_CACHE_TTL,
             max_body_size: DEFAULT_MAX_BODY_SIZE,
-            max_pending: DEFAULT_MAX_PENDING,
-            max_cache: DEFAULT_MAX_CACHE,
+            max_entries: DEFAULT_MAX_ENTRIES,
+            persist_db: None,
         }
     }
 }
@@ -109,36 +120,44 @@ impl HttpRelayBuilder {
         self
     }
 
-    /// Configure the TTL for cached values (default: 5 minutes).
-    /// Values remain available for this duration after the first consumer
-    /// retrieves them.
-    pub fn cache_ttl(mut self, ttl: Duration) -> Self {
-        self.0.cache_ttl = ttl;
+    /// Configure the timeout for link endpoints (default: 10 minutes).
+    /// This is how long producers wait for consumers (and vice versa).
+    pub fn link_timeout(mut self, timeout: Duration) -> Self {
+        self.0.link_timeout = timeout;
         self
     }
 
-    /// Configure the timeout for link2 endpoints (default: 25 seconds).
+    /// Configure the timeout for inbox long-poll endpoints (default: 25 seconds).
     /// Shorter than the default request timeout to avoid proxy timeouts.
-    pub fn link2_timeout(mut self, timeout: Duration) -> Self {
-        self.0.link2_timeout = timeout;
+    pub fn inbox_timeout(mut self, timeout: Duration) -> Self {
+        self.0.inbox_timeout = timeout;
         self
     }
 
-    /// Configure the maximum request body size (default: 10KB).
+    /// Configure the TTL for inbox messages (default: 5 minutes).
+    /// Messages persist for this duration after being sent.
+    pub fn inbox_cache_ttl(mut self, ttl: Duration) -> Self {
+        self.0.inbox_cache_ttl = ttl;
+        self
+    }
+
+    /// Configure the maximum request body size (default: 2KB).
     pub fn max_body_size(mut self, size: usize) -> Self {
         self.0.max_body_size = size;
         self
     }
 
-    /// Configure the maximum pending requests (default: 10000).
-    pub fn max_pending(mut self, max: usize) -> Self {
-        self.0.max_pending = max;
+    /// Configure the maximum entries in the waiting list (default: 10000).
+    /// When this limit is reached, oldest entries are evicted.
+    pub fn max_entries(mut self, max: usize) -> Self {
+        self.0.max_entries = max;
         self
     }
 
-    /// Configure the maximum cached entries (default: 10000).
-    pub fn max_cache(mut self, max: usize) -> Self {
-        self.0.max_cache = max;
+    /// Configure the path to SQLite database for persistent storage.
+    /// If not specified, uses in-memory storage (data lost on restart).
+    pub fn persist_db(mut self, path: Option<PathBuf>) -> Self {
+        self.0.persist_db = path;
         self
     }
 
@@ -164,9 +183,14 @@ impl HttpRelay {
                 "/link/{id}",
                 get(link::get_handler).post(link::post_handler),
             )
+            // Inbox: specific routes first to avoid conflicts with /{id}
+            .route("/inbox/{id}/ack", get(inbox::ack_handler))
+            .route("/inbox/{id}/await", get(inbox::await_handler))
             .route(
-                "/link2/{id}",
-                get(link2::get_handler).post(link2::post_handler),
+                "/inbox/{id}",
+                get(inbox::get_handler)
+                    .post(inbox::post_handler)
+                    .delete(inbox::delete_handler),
             )
             .layer(DefaultBodyLimit::max(max_body_size))
             .layer(CorsLayer::very_permissive())
@@ -177,7 +201,7 @@ impl HttpRelay {
     /// Creates the HTTP router for the HTTP relay.
     #[cfg(test)]
     pub(crate) fn create_app(config: Config) -> Result<(Router, AppState)> {
-        let app_state = AppState::new(config);
+        let app_state = AppState::new(config)?;
         let app = Self::build_router(app_state.clone());
         Ok((app, app_state))
     }
@@ -191,7 +215,7 @@ impl HttpRelay {
     }
 
     async fn start(config: Config) -> Result<Self> {
-        let app_state = AppState::new(config.clone());
+        let app_state = AppState::new(config.clone())?;
         let app = Self::build_router(app_state.clone());
 
         let http_handle = Handle::new();
@@ -211,16 +235,17 @@ impl HttpRelay {
                 .map_err(|error| tracing::error!(?error, "HttpRelay http server error"))
         });
 
-        // Spawn background task to clean up expired cache entries
+        // Spawn background task to clean up expired entries.
+        // 15 seconds balances memory reclamation (don't let stale entries pile up)
+        // against CPU overhead (cleanup scans the entire LRU cache).
         let cleanup_interval = Duration::from_secs(15);
         let pending_list = app_state.pending_list.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(cleanup_interval).await;
-                let mut list = pending_list.lock().await;
-                let removed = list.cleanup_expired_cache();
+                let removed = pending_list.lock().await.cleanup_expired();
                 if removed > 0 {
-                    tracing::debug!(removed, "Cleaned up expired cache entries");
+                    tracing::debug!(removed, "Cleaned up expired entries");
                 }
             }
         });
@@ -243,17 +268,19 @@ impl HttpRelay {
 
     /// Returns the localhost Url of this server.
     pub fn local_url(&self) -> Url {
+        // Infallible: "http://localhost:{port}" is always a valid URL format
         Url::parse(&format!("http://localhost:{}", self.http_address.port()))
-            .expect("local_url should be formatted fine")
+            .expect("hardcoded URL scheme and localhost are always valid")
     }
 
     /// Returns the localhost URL of Link endpoints
     pub fn local_link_url(&self) -> Url {
         let mut url = self.local_url();
 
+        // Infallible: http:// URLs always support path segments (only cannot-be-a-base URLs fail)
         let mut segments = url
             .path_segments_mut()
-            .expect("HttpRelay::local_link_url path_segments_mut");
+            .expect("http URLs always have path segments");
 
         segments.push("link");
 

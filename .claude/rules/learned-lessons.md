@@ -1,7 +1,7 @@
 # Lessons Learned
 
 - Group related functionality in one folder (e.g., handlers with their server)
-- Tests belong in the same file as the code they test (Rust `#[cfg(test)]` pattern)
+- Tests belong in the same file as the code they test (Rust `#[cfg(test)]` pattern). Test don't count towards the file size limit.
 - mod.rs only contains imports/exports, not actual logic
 - CLI flag naming: use consistent prefixes for related params (e.g., `--link2-timeout`, `--link2-cache-ttl`)
 - Ask about security model before suggesting fixes - apparent "issues" may be intentional design (e.g., ID as shared secret, open CORS for public relays)
@@ -9,7 +9,16 @@
 - README is for onboarding devs - security/implementation docs belong in code docstrings near relevant code
 - Comments: explain WHY, not WHAT - don't add comments that repeat what code already says (e.g., `// Check if X enabled` before `if config.x_enabled`)
 - Move fallible operations outside `tokio::spawn` so errors propagate via `?` instead of panicking silently in background tasks
-- Check actual default values from code (e.g., CLI args) instead of assuming common defaults like 3000
+- Check actual default values from code (e.g., CLI args) instead of assuming common defaults like 3000; verify README/OpenAPI match actual CLI flags
+- When changing defaults: update constant, docstring, CLI arg default, README, and OpenAPI together
+- Domain terminology: pick terms (producer/consumer) and use consistently across code, docs, API specs - don't mix with implementation terms (sender/receiver for channels)
 - TCP can't detect sudden disconnects (Wi-Fi off, app killed) - server writes succeed locally while packets vanish; caching is the safety net, not app-level ACK
 - Oneshot channel sends: never ignore `let _ = sender.send(...)` - check result and handle stale receivers (e.g., disconnected clients leave orphan entries in waiting lists)
 - API design for mobile: prefer long-poll endpoints over polling loops - simpler client code, fewer requests, works with OS backgrounding
+- Persistence format: SQLite beats JSON for instant writes (O(1) row ops vs O(n) file rewrite); JSON's readability is worthless for encrypted blobs
+- Disk overflow protection: enforce max entries at storage layer with LRU eviction (delete oldest on insert when at capacity)
+- Runtime constructs (oneshot channels, waiters) can't be serialized - keep in-memory, clients retry after restart
+- rusqlite Connection is not Send - wrap in Mutex for thread-safe access from async handlers; WAL mode for concurrent reads
+- Consumer-before-producer pattern: waiters can exist without DB entries - don't treat missing entries as "orphaned" during cleanup
+- Cleanup ordering: identify items to clean BEFORE deleting from source of truth (can't find expired entries after they're deleted)
+- Always add regression tests when fixing bugs - prevents the same bug from recurring

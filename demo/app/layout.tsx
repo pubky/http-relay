@@ -1,6 +1,6 @@
 export const metadata = {
   title: 'HTTP Relay Demo',
-  description: 'Demo for testing http-relay /link2 endpoint',
+  description: 'Demo for testing http-relay /inbox endpoint operations',
 }
 
 export default function RootLayout({

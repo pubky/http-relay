@@ -13,22 +13,25 @@ function generateRandomId() {
   return Math.random().toString(36).substring(2, 10)
 }
 
-const DEFAULT_RELAY_URL = process.env.NEXT_PUBLIC_RELAY_URL || 'http://localhost:8080'
+const DEFAULT_RELAY_URL =
+  process.env.NEXT_PUBLIC_RELAY_URL || 'http://localhost:8080'
 
 function HomeContent() {
   const searchParams = useSearchParams()
   const [relayUrl, setRelayUrl] = useState(DEFAULT_RELAY_URL)
-  const [endpoint, setEndpoint] = useState<'link' | 'link2'>('link2')
   const [channelId, setChannelId] = useState('')
   const [producerContent, setProducerContent] = useState('hello world')
   const [logs, setLogs] = useState<LogEntry[]>([])
-  const [consumerRunning, setConsumerRunning] = useState(false)
-  const [producerRunning, setProducerRunning] = useState(false)
 
-  const consumerAbortRef = useRef<AbortController | null>(null)
-  const producerAbortRef = useRef<AbortController | null>(null)
+  const [postLoading, setPostLoading] = useState(false)
+  const [checkAckLoading, setCheckAckLoading] = useState(false)
+  const [sendAckLoading, setSendAckLoading] = useState(false)
+  const [getMessageActive, setGetMessageActive] = useState(false)
+  const [awaitAckActive, setAwaitAckActive] = useState(false)
 
-  // Read config from URL on mount
+  const getMessageAbortRef = useRef<AbortController | null>(null)
+  const awaitAckAbortRef = useRef<AbortController | null>(null)
+
   useEffect(() => {
     const channel = searchParams.get('channel')
     const relay = searchParams.get('relay')
@@ -36,9 +39,9 @@ function HomeContent() {
     if (relay) setRelayUrl(relay)
   }, [searchParams])
 
-  // Update URL when channel changes
   const updateChannelId = useCallback((newId: string) => {
     setChannelId(newId)
+    setLogs([])
     const url = new URL(window.location.href)
     if (newId) {
       url.searchParams.set('channel', newId)
@@ -49,121 +52,173 @@ function HomeContent() {
   }, [])
 
   const addLog = useCallback((type: LogEntry['type'], message: string) => {
-    setLogs(prev => [...prev, { timestamp: new Date(), type, message }])
+    setLogs((prev) => [...prev, { timestamp: new Date(), type, message }])
   }, [])
 
-  const startConsumer = async () => {
-    if (!channelId.trim()) {
-      addLog('error', 'Channel ID is required')
-      return
-    }
-
-    setConsumerRunning(true)
-    consumerAbortRef.current = new AbortController()
-    const id = channelId.trim()
-
-    addLog('consumer', `Starting consumer loop for ID: ${id}`)
-
-    while (true) {
-      if (consumerAbortRef.current?.signal.aborted) {
-        addLog('consumer', 'Consumer stopped by user')
-        break
-      }
-
-      try {
-        addLog('consumer', `GET ${relayUrl}/${endpoint}/${id}`)
-        const response = await fetch(`${relayUrl}/${endpoint}/${id}`, {
-          signal: consumerAbortRef.current?.signal,
-        })
-
-        if (response.status === 200) {
-          const data = await response.text()
-          addLog('consumer', `Received: ${data}`)
-          break
-        }
-
-        if (response.status === 408) {
-          addLog('consumer', '408 Timeout - retrying...')
-          continue
-        }
-
-        addLog('error', `Unexpected status: ${response.status}`)
-        break
-      } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') {
-          addLog('consumer', 'Consumer stopped by user')
-          break
-        }
-        addLog('error', `Consumer error: ${err}`)
-        break
-      }
-    }
-
-    setConsumerRunning(false)
-  }
-
-  const stopConsumer = () => {
-    consumerAbortRef.current?.abort()
-  }
-
-  const startProducer = async () => {
-    if (!channelId.trim()) {
-      addLog('error', 'Channel ID is required')
-      return
-    }
-
-    setProducerRunning(true)
-    producerAbortRef.current = new AbortController()
-    const id = channelId.trim()
-    const content = producerContent
-
-    addLog('producer', `Starting producer loop for ID: ${id}`)
-
-    while (true) {
-      if (producerAbortRef.current?.signal.aborted) {
-        addLog('producer', 'Producer stopped by user')
-        break
-      }
-
-      try {
-        addLog('producer', `POST ${relayUrl}/${endpoint}/${id} with: ${content}`)
-        const response = await fetch(`${relayUrl}/${endpoint}/${id}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain' },
-          body: content,
-          signal: producerAbortRef.current?.signal,
-        })
-
-        if (response.status === 200) {
-          addLog('producer', 'Consumer received the message!')
-          break
-        }
-
-        if (response.status === 408) {
-          addLog('producer', '408 Timeout - retrying...')
-          continue
-        }
-
-        addLog('error', `Unexpected status: ${response.status}`)
-        break
-      } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') {
-          addLog('producer', 'Producer stopped by user')
-          break
-        }
-        addLog('error', `Producer error: ${err}`)
-        break
-      }
-    }
-
-    setProducerRunning(false)
-  }
-
-  const stopProducer = () => {
-    producerAbortRef.current?.abort()
-  }
-
   const clearLogs = () => setLogs([])
+
+  const handlePost = async () => {
+    if (!channelId.trim()) {
+      addLog('error', 'Channel ID is required')
+      return
+    }
+
+    setPostLoading(true)
+    const id = channelId.trim()
+
+    try {
+      addLog('producer', `POST /inbox/${id} with: ${producerContent}`)
+      const response = await fetch(`${relayUrl}/inbox/${id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },
+        body: producerContent,
+      })
+
+      if (response.status === 200) {
+        addLog('producer', 'Message stored (200)')
+      } else {
+        addLog('error', `Failed with status: ${response.status}`)
+      }
+    } catch (err) {
+      addLog('error', `Error: ${err}`)
+    }
+
+    setPostLoading(false)
+  }
+
+  const handleCheckAck = async () => {
+    if (!channelId.trim()) {
+      addLog('error', 'Channel ID is required')
+      return
+    }
+
+    setCheckAckLoading(true)
+    const id = channelId.trim()
+
+    try {
+      addLog('producer', `GET /inbox/${id}/ack`)
+      const response = await fetch(`${relayUrl}/inbox/${id}/ack`)
+
+      if (response.status === 200) {
+        const data = await response.text()
+        addLog('producer', `ACK status: ${data}`)
+      } else {
+        addLog('error', `Failed with status: ${response.status}`)
+      }
+    } catch (err) {
+      addLog('error', `Error: ${err}`)
+    }
+
+    setCheckAckLoading(false)
+  }
+
+  const handleAwaitAck = async () => {
+    if (!channelId.trim()) {
+      addLog('error', 'Channel ID is required')
+      return
+    }
+
+    if (awaitAckActive) {
+      awaitAckAbortRef.current?.abort()
+      return
+    }
+
+    setAwaitAckActive(true)
+    awaitAckAbortRef.current = new AbortController()
+    const id = channelId.trim()
+
+    try {
+      addLog('producer', `GET /inbox/${id}/await (waiting...)`)
+      const response = await fetch(`${relayUrl}/inbox/${id}/await`, {
+        signal: awaitAckAbortRef.current.signal,
+      })
+
+      if (response.status === 200) {
+        addLog('producer', 'ACKed!')
+      } else if (response.status === 408) {
+        addLog('producer', 'Timeout (408)')
+      } else {
+        addLog('error', `Failed with status: ${response.status}`)
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        addLog('producer', 'Await ACK cancelled')
+      } else {
+        addLog('error', `Error: ${err}`)
+      }
+    }
+
+    setAwaitAckActive(false)
+  }
+
+  const handleGetMessage = async () => {
+    if (!channelId.trim()) {
+      addLog('error', 'Channel ID is required')
+      return
+    }
+
+    if (getMessageActive) {
+      getMessageAbortRef.current?.abort()
+      return
+    }
+
+    setGetMessageActive(true)
+    getMessageAbortRef.current = new AbortController()
+    const id = channelId.trim()
+
+    try {
+      addLog('consumer', `GET /inbox/${id} (waiting...)`)
+      const response = await fetch(`${relayUrl}/inbox/${id}`, {
+        signal: getMessageAbortRef.current.signal,
+      })
+
+      if (response.status === 200) {
+        const data = await response.text()
+        addLog('consumer', `Received: ${data}`)
+      } else if (response.status === 408) {
+        addLog('consumer', 'Timeout (408)')
+      } else {
+        addLog('error', `Failed with status: ${response.status}`)
+      }
+    } catch (err) {
+      if (err instanceof Error && err.name === 'AbortError') {
+        addLog('consumer', 'GET cancelled')
+      } else {
+        addLog('error', `Error: ${err}`)
+      }
+    }
+
+    setGetMessageActive(false)
+  }
+
+  const handleSendAck = async () => {
+    if (!channelId.trim()) {
+      addLog('error', 'Channel ID is required')
+      return
+    }
+
+    setSendAckLoading(true)
+    const id = channelId.trim()
+
+    try {
+      addLog('consumer', `DELETE /inbox/${id}`)
+      const response = await fetch(`${relayUrl}/inbox/${id}`, {
+        method: 'DELETE',
+      })
+
+      if (response.status === 200) {
+        addLog('consumer', 'ACK sent (200)')
+      } else if (response.status === 404) {
+        addLog('consumer', 'Nothing to ACK (404)')
+      } else {
+        addLog('error', `Failed with status: ${response.status}`)
+      }
+    } catch (err) {
+      addLog('error', `Error: ${err}`)
+    }
+
+    setSendAckLoading(false)
+  }
 
   const sectionStyle: React.CSSProperties = {
     backgroundColor: 'white',
@@ -182,27 +237,42 @@ function HomeContent() {
     boxSizing: 'border-box',
   }
 
-  const buttonStyle = (active: boolean, color: string): React.CSSProperties => ({
+  const buttonStyle = (
+    color: string,
+    isLoading: boolean = false
+  ): React.CSSProperties => ({
     padding: '8px 16px',
-    backgroundColor: active ? '#999' : color,
+    backgroundColor: color,
     color: 'white',
     border: 'none',
     borderRadius: '4px',
-    cursor: active ? 'not-allowed' : 'pointer',
+    cursor: 'pointer',
     fontSize: '14px',
     marginRight: '8px',
+    opacity: isLoading ? 0.7 : 1,
   })
 
   return (
     <div style={{ maxWidth: '800px', margin: '0 auto' }}>
       <h1 style={{ marginBottom: '24px' }}>HTTP Relay Demo</h1>
 
-      {/* Config Section */}
+      {/* Configuration Section */}
       <div style={sectionStyle}>
-        <h2 style={{ margin: '0 0 12px 0', fontSize: '18px' }}>Configuration</h2>
-        <div style={{ display: 'flex', gap: '12px', marginBottom: '12px' }}>
+        <h2 style={{ margin: '0 0 12px 0', fontSize: '18px' }}>
+          Configuration
+        </h2>
+        <div style={{ display: 'flex', gap: '12px' }}>
           <div style={{ flex: 2 }}>
-            <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#666' }}>Relay URL</label>
+            <label
+              style={{
+                display: 'block',
+                marginBottom: '4px',
+                fontSize: '12px',
+                color: '#666',
+              }}
+            >
+              Relay URL
+            </label>
             <input
               type="text"
               value={relayUrl}
@@ -211,45 +281,17 @@ function HomeContent() {
               style={inputStyle}
             />
           </div>
-          <div>
-            <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#666' }}>Endpoint</label>
-            <div style={{ display: 'flex' }}>
-              <button
-                onClick={() => setEndpoint('link2')}
-                disabled={consumerRunning || producerRunning}
-                style={{
-                  padding: '8px 16px',
-                  backgroundColor: endpoint === 'link2' ? '#2563eb' : '#e5e7eb',
-                  color: endpoint === 'link2' ? 'white' : '#374151',
-                  border: 'none',
-                  borderRadius: '4px 0 0 4px',
-                  cursor: consumerRunning || producerRunning ? 'not-allowed' : 'pointer',
-                  fontSize: '14px',
-                }}
-              >
-                /link2
-              </button>
-              <button
-                onClick={() => setEndpoint('link')}
-                disabled={consumerRunning || producerRunning}
-                style={{
-                  padding: '8px 16px',
-                  backgroundColor: endpoint === 'link' ? '#2563eb' : '#e5e7eb',
-                  color: endpoint === 'link' ? 'white' : '#374151',
-                  border: 'none',
-                  borderRadius: '0 4px 4px 0',
-                  cursor: consumerRunning || producerRunning ? 'not-allowed' : 'pointer',
-                  fontSize: '14px',
-                }}
-              >
-                /link
-              </button>
-            </div>
-          </div>
-        </div>
-        <div style={{ display: 'flex', gap: '12px' }}>
           <div style={{ flex: 1 }}>
-            <label style={{ display: 'block', marginBottom: '4px', fontSize: '12px', color: '#666' }}>Channel ID</label>
+            <label
+              style={{
+                display: 'block',
+                marginBottom: '4px',
+                fontSize: '12px',
+                color: '#666',
+              }}
+            >
+              Channel ID
+            </label>
             <div style={{ display: 'flex', gap: '8px' }}>
               <input
                 type="text"
@@ -257,18 +299,16 @@ function HomeContent() {
                 onChange={(e) => updateChannelId(e.target.value)}
                 placeholder="my-channel"
                 style={{ ...inputStyle, flex: 1 }}
-                disabled={consumerRunning || producerRunning}
               />
               <button
                 onClick={() => updateChannelId(generateRandomId())}
-                disabled={consumerRunning || producerRunning}
                 style={{
                   padding: '8px 12px',
-                  backgroundColor: consumerRunning || producerRunning ? '#ccc' : '#6b7280',
+                  backgroundColor: '#6b7280',
                   color: 'white',
                   border: 'none',
                   borderRadius: '4px',
-                  cursor: consumerRunning || producerRunning ? 'not-allowed' : 'pointer',
+                  cursor: 'pointer',
                   fontSize: '12px',
                   whiteSpace: 'nowrap',
                 }}
@@ -277,27 +317,6 @@ function HomeContent() {
               </button>
             </div>
           </div>
-        </div>
-      </div>
-
-      {/* Consumer Section */}
-      <div style={sectionStyle}>
-        <h2 style={{ margin: '0 0 12px 0', fontSize: '18px' }}>Consumer</h2>
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-          {!consumerRunning ? (
-            <button onClick={startConsumer} style={buttonStyle(false, '#2563eb')}>
-              Start Consumer
-            </button>
-          ) : (
-            <button onClick={stopConsumer} style={buttonStyle(false, '#dc2626')}>
-              Stop
-            </button>
-          )}
-          {consumerRunning && (
-            <span style={{ color: '#2563eb', fontSize: '14px' }}>
-              Waiting for producer...
-            </span>
-          )}
         </div>
       </div>
 
@@ -310,32 +329,83 @@ function HomeContent() {
             onChange={(e) => setProducerContent(e.target.value)}
             placeholder="Message content"
             style={{ ...inputStyle, minHeight: '60px', resize: 'vertical' }}
-            disabled={producerRunning}
           />
         </div>
-        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-          {!producerRunning ? (
-            <button onClick={startProducer} style={buttonStyle(false, '#16a34a')}>
-              Send
-            </button>
-          ) : (
-            <button onClick={stopProducer} style={buttonStyle(false, '#dc2626')}>
-              Stop
-            </button>
-          )}
-          {producerRunning && (
-            <span style={{ color: '#16a34a', fontSize: '14px' }}>
-              Waiting for consumer...
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <button
+            onClick={handlePost}
+            disabled={postLoading}
+            style={buttonStyle('#16a34a', postLoading)}
+          >
+            {postLoading ? 'Posting...' : 'POST'}
+          </button>
+          <button
+            onClick={handleCheckAck}
+            disabled={checkAckLoading}
+            style={buttonStyle('#6b7280', checkAckLoading)}
+          >
+            {checkAckLoading ? 'Checking...' : 'Check ACK'}
+          </button>
+          <button
+            onClick={handleAwaitAck}
+            style={buttonStyle(
+              awaitAckActive ? '#dc2626' : '#2563eb',
+              false
+            )}
+          >
+            {awaitAckActive ? 'Cancel' : 'Await ACK'}
+          </button>
+          {awaitAckActive && (
+            <span style={{ color: '#2563eb', fontSize: '14px' }}>
+              Waiting...
             </span>
           )}
         </div>
       </div>
 
-      {/* Log Section */}
+      {/* Consumer Section */}
       <div style={sectionStyle}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+        <h2 style={{ margin: '0 0 12px 0', fontSize: '18px' }}>Consumer</h2>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <button
+            onClick={handleGetMessage}
+            style={buttonStyle(
+              getMessageActive ? '#dc2626' : '#2563eb',
+              false
+            )}
+          >
+            {getMessageActive ? 'Cancel' : 'GET Message'}
+          </button>
+          <button
+            onClick={handleSendAck}
+            disabled={sendAckLoading}
+            style={buttonStyle('#ea580c', sendAckLoading)}
+          >
+            {sendAckLoading ? 'Sending...' : 'Send ACK'}
+          </button>
+          {getMessageActive && (
+            <span style={{ color: '#2563eb', fontSize: '14px' }}>
+              Waiting...
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Request Log Section */}
+      <div style={sectionStyle}>
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: '12px',
+          }}
+        >
           <h2 style={{ margin: 0, fontSize: '18px' }}>Request Log</h2>
-          <button onClick={clearLogs} style={{ ...buttonStyle(false, '#6b7280'), marginRight: 0 }}>
+          <button
+            onClick={clearLogs}
+            style={{ ...buttonStyle('#6b7280'), marginRight: 0 }}
+          >
             Clear
           </button>
         </div>
@@ -362,9 +432,13 @@ function HomeContent() {
                 <span
                   style={{
                     color:
-                      log.type === 'consumer' ? '#60a5fa' :
-                      log.type === 'producer' ? '#4ade80' :
-                      log.type === 'error' ? '#f87171' : '#d4d4d4',
+                      log.type === 'consumer'
+                        ? '#60a5fa'
+                        : log.type === 'producer'
+                          ? '#4ade80'
+                          : log.type === 'error'
+                            ? '#f87171'
+                            : '#d4d4d4',
                   }}
                 >
                   [{log.type.toUpperCase()}]

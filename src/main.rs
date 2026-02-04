@@ -1,12 +1,15 @@
 //! HTTP Relay server executable.
 
-use std::{net::IpAddr, time::Duration};
+use std::{net::IpAddr, path::PathBuf, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
 use http_relay::HttpRelayBuilder;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
+
+/// Default maximum entries in the waiting list.
+const DEFAULT_MAX_ENTRIES: usize = 10_000;
 
 #[derive(Parser, Debug)]
 #[command(name = "http-relay")]
@@ -21,25 +24,30 @@ struct Args {
     #[arg(short, long, default_value_t = 8080)]
     port: u16,
 
-    /// Cache TTL in seconds for retry support (link2 endpoint)
-    #[arg(long, default_value_t = 300)]
-    link2_cache_ttl: u64,
+    /// Link endpoint timeout in seconds (how long producer/consumer wait for each other)
+    #[arg(long, default_value_t = 600)]
+    link_timeout: u64,
 
-    /// Link2 endpoint timeout in seconds (shorter to avoid proxy timeouts)
+    /// Inbox long-poll timeout in seconds (shorter to avoid proxy timeouts)
     #[arg(long, default_value_t = 25)]
-    link2_timeout: u64,
+    inbox_timeout: u64,
 
-    /// Maximum request body size in bytes (default: 10KB)
-    #[arg(long, default_value_t = 10 * 1024)]
+    /// Inbox message TTL in seconds (how long messages persist before expiring)
+    #[arg(long, default_value_t = 300)]
+    inbox_cache_ttl: u64,
+
+    /// Maximum request body size in bytes
+    #[arg(long, default_value_t = 2 * 1024)]
     max_body_size: usize,
 
-    /// Maximum pending requests (producers + consumers combined, default: 10000)
-    #[arg(long, default_value_t = 10_000)]
-    max_pending: usize,
+    /// Maximum entries in the waiting list (oldest entries evicted when full)
+    #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES)]
+    max_entries: usize,
 
-    /// Maximum cached entries (default: 10000)
-    #[arg(long, default_value_t = 10_000)]
-    max_cache: usize,
+    /// Path to SQLite database for persistent storage.
+    /// If not specified, uses in-memory storage (data lost on restart).
+    #[arg(long)]
+    persist_db: Option<PathBuf>,
 
     /// Verbosity level: -v (info), -vv (debug), -vvv (trace)
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -59,11 +67,12 @@ async fn main() -> Result<()> {
     let relay = HttpRelayBuilder::default()
         .bind_address(args.bind)
         .http_port(args.port)
-        .cache_ttl(Duration::from_secs(args.link2_cache_ttl))
-        .link2_timeout(Duration::from_secs(args.link2_timeout))
+        .link_timeout(Duration::from_secs(args.link_timeout))
+        .inbox_timeout(Duration::from_secs(args.inbox_timeout))
+        .inbox_cache_ttl(Duration::from_secs(args.inbox_cache_ttl))
         .max_body_size(args.max_body_size)
-        .max_pending(args.max_pending)
-        .max_cache(args.max_cache)
+        .max_entries(args.max_entries)
+        .persist_db(args.persist_db)
         .run()
         .await?;
 
@@ -72,8 +81,8 @@ async fn main() -> Result<()> {
         "HTTP relay server started"
     );
     tracing::info!(
-        link = %relay.local_link_url(),
-        "Endpoints: /link2/{{id}} (recommended), /link/{{id}} (deprecated)"
+        url = %relay.local_url(),
+        "Endpoints: /inbox/{{id}} (recommended), /link/{{id}}"
     );
 
     tokio::signal::ctrl_c().await?;

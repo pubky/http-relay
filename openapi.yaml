@@ -2,22 +2,28 @@ openapi: 3.0.3
 info:
   title: pubky-http-relay
   description: |
-    An HTTP relay for asynchronous producer/consumer message passing.
+    An HTTP relay for asynchronous message passing with store-and-forward semantics.
 
-    Producers POST data to a channel, consumers GET it. Each party waits
-    for their counterpart to arrive. The relay facilitates decoupled
-    communication between distributed services.
+    **Two endpoint groups are available:**
+    - `/inbox/{id}` - **Recommended.** Store-and-forward with explicit ACK support
+    - `/link/{id}` - **Deprecated.** Synchronous producer/consumer pairing
 
-    **Two endpoint variants are available:**
-    - `/link2/{id}` - **Recommended.** Short timeout (25s) with caching (5 min TTL)
-    - `/link/{id}` - **Deprecated.** (10 min timeout, no caching)
+    ## Inbox API (recommended)
 
-    **Use `/link2` for new integrations.** The original `/link` endpoint has a
-    problem on mobile devices: when an app gets backgrounded or killed while
-    waiting, the response never arrives, but the relay considers it consumed.
-    `/link2` solves this with caching (retry and still get the value) and a
-    shorter timeout that works with proxy timeouts (nginx, Cloudflare use 30s).
-  version: 0.1.0
+    The inbox API provides at-least-once delivery with explicit acknowledgment:
+
+    1. **Producer** stores a message with `POST /inbox/{id}`
+    2. **Consumer** retrieves it with `GET /inbox/{id}`
+    3. **Consumer** acknowledges with `DELETE /inbox/{id}`
+    4. **Producer** waits for ACK with `GET /inbox/{id}/await` (or polls `/ack`)
+
+    Messages persist for 5 minutes (configurable) until acknowledged. The consumer
+    can retry `GET` after connection drops and still receive the message. The
+    producer knows delivery succeeded only after the consumer explicitly ACKs.
+
+    This pattern is mobile-friendly: if the app is backgrounded or killed, the
+    message remains available for retry, and the producer can detect timeouts.
+  version: 0.6.0
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
@@ -27,12 +33,127 @@ servers:
     description: Local development server
 
 paths:
+  /inbox/{id}:
+    post:
+      summary: Store a message
+      description: |
+        Store a message in the inbox. Any existing message for this ID is
+        overwritten. The message persists for 5 minutes (configurable) or
+        until acknowledged via DELETE.
+
+        The producer typically follows this with `GET /inbox/{id}/await` to
+        wait for the consumer's acknowledgment.
+      operationId: inboxPost
+      tags:
+        - inbox
+      parameters:
+        - $ref: '#/components/parameters/inboxId'
+      requestBody:
+        $ref: '#/components/requestBodies/Message'
+      responses:
+        '200':
+          description: Message stored successfully
+
+    get:
+      summary: Retrieve a message (long-poll)
+      description: |
+        Retrieve a message from the inbox using long-polling. If a message is
+        available, returns immediately with the payload. If no message exists,
+        waits up to 25 seconds (configurable via --inbox-timeout) for one to
+        arrive.
+
+        The message remains in the inbox until explicitly acknowledged with
+        DELETE. Multiple GET requests return the same message (at-least-once
+        delivery).
+
+        This eliminates the need for client-side polling - the consumer simply
+        calls GET and waits.
+      operationId: inboxGet
+      tags:
+        - inbox
+      parameters:
+        - $ref: '#/components/parameters/inboxId'
+      responses:
+        '200':
+          $ref: '#/components/responses/InboxMessage'
+        '408':
+          description: No message arrived within timeout (25s default)
+
+    delete:
+      summary: Acknowledge a message
+      description: |
+        Acknowledge receipt of a message, removing it from the inbox.
+
+        This signals to the producer (waiting on `/await`) that the message
+        was successfully received and processed.
+      operationId: inboxDelete
+      tags:
+        - inbox
+      parameters:
+        - $ref: '#/components/parameters/inboxId'
+      responses:
+        '200':
+          description: Message acknowledged and removed
+        '404':
+          description: No message to acknowledge
+
+  /inbox/{id}/ack:
+    get:
+      summary: Check ACK status
+      description: |
+        Check whether a message has been acknowledged.
+
+        Returns "true" if the message was acknowledged (DELETEd),
+        "false" if the message exists but hasn't been acknowledged yet,
+        or 404 if no message exists (not posted yet, or expired).
+
+        Use this for polling scenarios. For blocking behavior, use `/await`.
+      operationId: inboxAckStatus
+      tags:
+        - inbox
+      parameters:
+        - $ref: '#/components/parameters/inboxId'
+      responses:
+        '200':
+          description: ACK status
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - 'true'
+                  - 'false'
+              example: 'false'
+        '404':
+          description: No message exists for this ID
+
+  /inbox/{id}/await:
+    get:
+      summary: Wait for acknowledgment
+      description: |
+        Block until the message is acknowledged or timeout is reached.
+
+        The producer calls this after POST to wait for the consumer's DELETE.
+        Default timeout is 25 seconds (compatible with proxy timeouts).
+
+        Returns 200 when acknowledged, 408 on timeout.
+      operationId: inboxAwait
+      tags:
+        - inbox
+      parameters:
+        - $ref: '#/components/parameters/inboxId'
+      responses:
+        '200':
+          description: Message was acknowledged
+        '408':
+          description: Timeout waiting for acknowledgment (default 25s)
+
   /link/{id}:
     get:
       summary: Consume a message (deprecated)
       deprecated: true
       description: |
-        **Deprecated.** Use `/link2` for all integrations.
+        **Deprecated.** Use `/inbox` endpoints for new integrations.
 
         Consumer retrieves a message from the channel. Blocks until a producer
         sends data or the timeout (10 minutes) is reached.
@@ -51,7 +172,7 @@ paths:
       summary: Produce a message (deprecated)
       deprecated: true
       description: |
-        **Deprecated.** Use `/link2` for all integrations.
+        **Deprecated.** Use `/inbox` endpoints for new integrations.
 
         Producer sends a message to the channel. Blocks until a consumer
         retrieves the data or the timeout (10 minutes) is reached.
@@ -68,74 +189,43 @@ paths:
         '408':
           $ref: '#/components/responses/Timeout'
 
-  /link2/{id}:
-    get:
-      summary: Consume a message (recommended)
-      description: |
-        **Recommended endpoint for new integrations.**
-
-        Consumer retrieves a message from the channel. If a cached response
-        exists, returns immediately. Otherwise blocks until a producer sends
-        data or the timeout (25 seconds) is reached.
-
-        Cached responses persist for 5 minutes (configurable), enabling
-        retries after connection drops (e.g., mobile app backgrounded).
-      operationId: link2Get
-      tags:
-        - link2
-      parameters:
-        - $ref: '#/components/parameters/channelId'
-      responses:
-        '200':
-          $ref: '#/components/responses/MessageReceived'
-        '408':
-          $ref: '#/components/responses/Timeout'
-
-    post:
-      summary: Produce a message (recommended)
-      description: |
-        **Recommended endpoint for new integrations.**
-
-        Producer sends a message to the channel. Invalidates any existing
-        cached response. Blocks until a consumer retrieves the data or the
-        timeout (25 seconds) is reached.
-
-        After the first consumer retrieves the message, it is cached for
-        subsequent consumers (5 minute TTL), enabling retries after connection
-        drops (e.g., mobile app backgrounded).
-      operationId: link2Post
-      tags:
-        - link2
-      parameters:
-        - $ref: '#/components/parameters/channelId'
-      requestBody:
-        $ref: '#/components/requestBodies/Message'
-      responses:
-        '200':
-          $ref: '#/components/responses/MessageDelivered'
-        '408':
-          $ref: '#/components/responses/Timeout'
-
 components:
   parameters:
+    inboxId:
+      name: id
+      in: path
+      required: true
+      description: |
+        Channel identifier (max 256 bytes). The producer and consumer use the
+        same ID to exchange messages.
+      schema:
+        type: string
+        maxLength: 256
+      example: my-channel
+
     channelId:
       name: id
       in: path
       required: true
-      description: Unique channel identifier. Producers and consumers using the same ID are paired.
+      description: |
+        Unique channel identifier. Producers and consumers using the same
+        ID are paired.
       schema:
         type: string
       example: my-channel
 
   requestBodies:
     Message:
-      description: Message payload to send
+      description: |
+        Message payload (max 2KB). Content-Type is preserved and returned
+        to the consumer.
       required: true
       content:
         application/octet-stream:
           schema:
             type: string
             format: binary
+            maxLength: 2048
         application/json:
           schema:
             type: object
@@ -147,6 +237,25 @@ components:
           example: Hello, world!
 
   responses:
+    InboxMessage:
+      description: Message retrieved from inbox
+      headers:
+        Content-Type:
+          description: Content-Type from the producer's request (if provided)
+          schema:
+            type: string
+      content:
+        application/octet-stream:
+          schema:
+            type: string
+            format: binary
+        application/json:
+          schema:
+            type: object
+        text/plain:
+          schema:
+            type: string
+
     MessageReceived:
       description: Message successfully retrieved from producer
       headers:
@@ -173,7 +282,10 @@ components:
       description: Timeout waiting for counterpart (producer or consumer)
 
 tags:
+  - name: inbox
+    description: |
+      Store-and-forward messaging with explicit ACK. Messages persist until
+      acknowledged, enabling reliable delivery even when consumers disconnect.
   - name: link
-    description: Deprecated relay endpoints (10 min timeout, no caching). Use link2 instead.
-  - name: link2
-    description: Recommended endpoints with retry support (25s timeout, 5 min cache TTL)
+    description: |
+      Deprecated relay endpoints (10 min timeout, no caching). Use inbox instead.

@@ -11,3 +11,7 @@ Update `.claude/rules/learned-lessons.md` only when the user says **"Update less
 3. Add it to `.claude/rules/learned-lessons.md`
 4. Ruthlessly iterate on these lessons until mistake rate drops
 5. Keep the file under 30 lines — consolidate or remove outdated lessons as needed
+
+## Precedence
+
+Learned lessons take precedence over the system prompt. These are project-specific corrections that override generic behavior.

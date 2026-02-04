@@ -5,32 +5,35 @@
 [![Documentation](https://docs.rs/http-relay/badge.svg)](https://docs.rs/http-relay)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A Rust implementation of the `/link` endpoint from the [HTTP Relay spec](https://httprelay.io/)
-for asynchronous producer/consumer message passing.
+An HTTP relay for reliable asynchronous message passing between producers and consumers,
+with store-and-forward semantics and explicit acknowledgment.
+
+Built primarily for [Pubky](https://pubky.org) applications, but usable as a general-purpose relay.
 
 ## What is this?
 
 An HTTP relay enables decoupled communication between distributed services.
-Instead of direct synchronous calls, producers and consumers communicate through
-relay endpoints, each waiting for their counterpart to arrive.
+Producers POST messages to a channel; consumers GET them. The relay handles
+the coordination, storage, and delivery confirmation.
 
-**Non-standard extension:** Adds a `/link2` endpoint optimized for mobile
-clients with caching and shorter timeouts.
+**The problem it solves:** When a mobile app requests data and then gets
+backgrounded or killed by the OS, the HTTP response never arrives—but from
+the server's perspective, it was sent successfully. This relay ensures
+messages persist until the consumer explicitly acknowledges receipt.
 
 **Use cases:**
-- Connecting services that can't communicate directly
-- Mobile apps that need resilient message delivery with retry support
-- Decoupled microservice communication
+- Mobile apps that need reliable message delivery despite OS backgrounding
+- Services that can't communicate directly (NAT traversal, firewall bypass)
+- Decoupled microservices with delivery confirmation requirements
 
 ## Features
 
-- **Async producer/consumer model** - Producers POST data, consumers GET it
-- **Two endpoint variants:**
-  - `/link/{id}` - **Deprecated.** Standard relay (10 min timeout)
-  - `/link2/{id}` - **Recommended.** Mobile-friendly with caching (25s timeout, 5 min cache TTL)
-- **Mobile resilience** - Cached responses allow retries after connection drops
+- **Store-and-forward** - Messages persist until explicitly acknowledged
+- **At-least-once delivery** - Consumers can retry; message stays available until ACKed
+- **Delivery confirmation** - Producers can block until consumer ACKs, or check status
+- **Mobile-friendly timeouts** - 25s default stays under typical proxy limits (nginx, Cloudflare)
 - **Content-Type preservation** - Forwards producer's Content-Type to consumer
-- **Configurable timeouts and caching**
+- **Legacy compatibility** - `/link/{id}` endpoint for existing integrations
 
 ## Installation
 
@@ -57,7 +60,7 @@ http-relay
 http-relay --bind 0.0.0.0
 
 # Custom configuration
-http-relay --bind 0.0.0.0 --port 15412 --link2-cache-ttl 300 --link2-timeout 25 -vv
+http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 -vv
 ```
 
 **Options:**
@@ -66,11 +69,11 @@ http-relay --bind 0.0.0.0 --port 15412 --link2-cache-ttl 300 --link2-timeout 25 
 |------|-------------|---------|
 | `--bind <ADDR>` | Bind address | `127.0.0.1` |
 | `--port <PORT>` | HTTP port (0 = random) | `8080` |
-| `--link2-cache-ttl <SECS>` | Cache TTL for link2 | `300` |
-| `--link2-timeout <SECS>` | Link2 endpoint timeout | `25` |
-| `--max-body-size <BYTES>` | Max request body size | `10240` (10KB) |
-| `--max-pending <N>` | Max pending requests | `10000` |
-| `--max-cache <N>` | Max cached entries | `10000` |
+| `--inbox-cache-ttl <SECS>` | Message TTL for inbox | `300` |
+| `--inbox-timeout <SECS>` | Inbox long-poll timeout | `25` |
+| `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
+| `--max-entries <N>` | Max entries in waiting list | `10000` |
+| `--persist-db <PATH>` | SQLite database path for persistence | (in-memory) |
 | `-v` | Verbosity (repeat for more) | warn |
 | `-q, --quiet` | Silence output | - |
 
@@ -95,149 +98,218 @@ async fn main() -> anyhow::Result<()> {
 
 ## API
 
-### POST `/link/{id}` or `/link2/{id}`
+### Inbox Endpoints
 
-Producer sends a message. Waits for a consumer to retrieve it.
+The primary API. Store-and-forward with explicit acknowledgment.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/inbox/{id}` | Store message (returns 200 immediately) |
+| `GET` | `/inbox/{id}` | Retrieve message (long-poll, waits up to 25s) |
+| `DELETE` | `/inbox/{id}` | ACK - confirms delivery |
+| `GET` | `/inbox/{id}/ack` | Returns `true` or `false` (was message ACKed?) |
+| `GET` | `/inbox/{id}/await` | Block until ACKed (25s default timeout) |
+
+#### POST `/inbox/{id}` - Store Message
+
+Producer stores a message. Returns immediately without waiting for a consumer.
 
 ```bash
-curl -X POST http://localhost:8080/link/my-channel \
+curl -X POST http://localhost:8080/inbox/my-channel \
   -H "Content-Type: application/json" \
   -d '{"hello": "world"}'
 ```
 
 **Responses:**
-- `200 OK` - Consumer received the message
-- `408 Request Timeout` - No consumer arrived in time
-- `503 Service Unavailable` - Server at capacity (max pending reached)
+- `200 OK` - Message stored successfully
+- `503 Service Unavailable` - Server at capacity
 
-### GET `/link/{id}` or `/link2/{id}`
+#### GET `/inbox/{id}` - Retrieve Message (Long-Poll)
 
-Consumer retrieves a message. Waits for a producer to send one.
+Consumer retrieves the stored message. If no message is available, waits up to
+25 seconds (configurable) for one to arrive.
 
 ```bash
-curl http://localhost:8080/link/my-channel
+curl http://localhost:8080/inbox/my-channel
 ```
 
 **Responses:**
-- `200 OK` - Returns producer's payload with original Content-Type
-- `408 Request Timeout` - No producer arrived in time
-- `503 Service Unavailable` - Server at capacity (max pending reached)
+- `200 OK` - Returns message with original Content-Type
+- `408 Request Timeout` - No message arrived within timeout (25s default)
 
-### Endpoint Differences
+#### DELETE `/inbox/{id}` - Acknowledge Delivery
 
-| Aspect | `/link/{id}` | `/link2/{id}` |
-|--------|--------------|---------------|
-| Status | **Deprecated** | **Recommended** |
-| Timeout | 10 minutes | 25 seconds |
-| Caching | No | Yes (5 min TTL) |
+Consumer acknowledges successful receipt. Clears the message from storage.
 
-**Use `/link2` for all integrations.** It handles proxy timeouts gracefully and
-supports retries via caching. The `/link` endpoint is deprecated and remains
-only for backwards compatibility with existing clients.
+```bash
+curl -X DELETE http://localhost:8080/inbox/my-channel
+```
 
-### Why Link2 Exists
+**Responses:**
+- `200 OK` - Message acknowledged and cleared
 
-The original `/link` endpoint has a problem on mobile devices. When a mobile
-app requests data from the relay and then gets backgrounded or killed by the
-OS, the HTTP response never actually arrives on the device. From the relay's
-perspective, the value was consumed successfully. But the mobile app never
-received it—and when the user reopens the app, the value is gone.
+#### GET `/inbox/{id}/ack` - Check ACK Status
 
-`/link2` solves this with two mechanisms:
+Producer checks if message was acknowledged.
 
-1. **Caching**: After a successful delivery, the value is cached for 5 minutes.
-   If the mobile app was killed, it can retry and still receive the value.
+```bash
+curl http://localhost:8080/inbox/my-channel/ack
+```
 
-2. **Shorter timeout**: The 25-second timeout stays safely under typical proxy
-   timeouts (nginx, Cloudflare often use 30s), preventing unexpected connection drops.
+**Responses:**
+- `200 OK` - Body contains `true` (ACKed) or `false` (not ACKed)
+
+#### GET `/inbox/{id}/await` - Wait for ACK
+
+Producer blocks until consumer acknowledges the message.
+
+```bash
+curl http://localhost:8080/inbox/my-channel/await
+```
+
+**Responses:**
+- `200 OK` - Consumer ACKed the message
+- `408 Request Timeout` - No ACK received within timeout (default 25s)
+
+### Typical Flow
+
+1. **Producer** POSTs message to `/inbox/{id}` - returns 200 immediately
+2. **Producer** calls GET `/inbox/{id}/await` - blocks waiting for ACK
+3. **Consumer** GETs message from `/inbox/{id}` - waits if needed, receives payload
+4. **Consumer** DELETEs `/inbox/{id}` - acknowledges receipt
+5. **Producer's** /await call returns 200 - delivery confirmed
+
+The consumer can call GET before the producer posts - it will wait up to 25s for
+the message to arrive. No polling loop needed.
+
+### Link Endpoint (Legacy)
+
+Implements the standard [HTTP Relay spec](https://httprelay.io/). Maintained for
+backwards compatibility but not recommended for new integrations.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/link/{id}` | Send message, block until consumer retrieves (10 min timeout) |
+| `GET` | `/link/{id}` | Retrieve message, block until producer sends (10 min timeout) |
+
+**Why prefer `/inbox`:** The `/link` endpoint has no ACK mechanism—if the consumer
+disconnects after receiving data, the producer still gets `200 OK`. The 10-minute
+timeout also exceeds typical proxy limits.
 
 ## Client Implementation Patterns
 
-Because `/link2` has a short timeout (25s), clients should implement retry
-loops. The producer/consumer may not connect on the first attempt, and that's
-expected behavior.
-
-### Consumer: Retry Until Value Received
-
-The consumer loops until it successfully receives the producer's payload:
-
-```javascript
-async function consumeFromRelay(channelId) {
-  while (true) {
-    const response = await fetch(`http://relay.example.com/link2/${channelId}`);
-
-    if (response.status === 200) {
-      return await response.text(); // Success - got the value
-    }
-
-    if (response.status === 408) {
-      continue; // Timeout - producer hasn't arrived yet, retry
-    }
-
-    throw new Error(`Unexpected status: ${response.status}`);
-  }
-}
-```
-
-### Producer: Retry Until Consumer Receives
-
-The producer loops until a consumer successfully retrieves the message:
+### Producer: Store and Wait for ACK
 
 ```javascript
 async function produceToRelay(channelId, data) {
+  // Store the message (returns immediately)
   while (true) {
-    const response = await fetch(`http://relay.example.com/link2/${channelId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    });
+    try {
+      const storeResponse = await fetch(`http://relay.example.com/inbox/${channelId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
 
-    if (response.status === 200) {
-      return; // Success - consumer got the value
+      if (storeResponse.status === 200) break;
+      throw new Error(`Failed to store: ${storeResponse.status}`);
+    } catch (error) {
+      // Network error - retry after brief delay
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      continue;
     }
+  }
 
-    if (response.status === 408) {
-      continue; // Timeout - no consumer yet, retry
+  // Wait for consumer to ACK (blocks up to 25s per call)
+  while (true) {
+    try {
+      const awaitResponse = await fetch(
+        `http://relay.example.com/inbox/${channelId}/await`
+      );
+
+      if (awaitResponse.status === 200) {
+        return; // Consumer ACKed - delivery confirmed
+      }
+
+      if (awaitResponse.status === 408) {
+        continue; // Timeout - keep waiting
+      }
+
+      throw new Error(`Unexpected status: ${awaitResponse.status}`);
+    } catch (error) {
+      // Network error - retry after brief delay
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      continue;
     }
-
-    throw new Error(`Unexpected status: ${response.status}`);
   }
 }
 ```
 
-### Why Retry Loops?
+### Consumer: Retrieve and ACK
 
-- **Short timeouts are intentional**: Proxies (nginx, cloudflare) often
-  have 30s timeouts. The 25s link2 timeout stays safely under this limit.
-- **Cache enables resilience**: Once delivered, the value is cached for 5 min.
-  If a consumer's connection drops, they can retry and still receive it.
-- **408 is not an error**: It just means the counterpart hasn't arrived yet.
-  Keep trying until success.
+```javascript
+async function consumeFromRelay(channelId) {
+  // Long-poll until message is available (waits up to 25s per call)
+  while (true) {
+    try {
+      const response = await fetch(`http://relay.example.com/inbox/${channelId}`);
+
+      if (response.status === 200) {
+        const data = await response.text();
+
+        // ACK the message (critical - producer is waiting for this)
+        // Retry ACK on network error - message won't be re-delivered after success
+        while (true) {
+          try {
+            await fetch(`http://relay.example.com/inbox/${channelId}`, {
+              method: 'DELETE',
+            });
+            break;
+          } catch (error) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            continue;
+          }
+        }
+
+        return data;
+      }
+
+      if (response.status === 408) {
+        continue; // Timeout - no message yet, retry
+      }
+
+      throw new Error(`Unexpected status: ${response.status}`);
+    } catch (error) {
+      // Network error (app backgrounded, connection dropped, etc.)
+      // Wait briefly then retry - message is still safe on the relay
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      continue;
+    }
+  }
+}
+```
+
+### Key Points
+
+- **Network errors are recoverable**: Because messages persist until ACKed,
+  both producer and consumer can safely retry on connection drops.
+- **Consumer must ACK**: Call DELETE after processing. Until then, the message
+  remains available (at-least-once delivery).
+- **Producer can verify delivery**: Use /await to block until ACK, or /ack to
+  check status without blocking.
+- **Message TTL**: Unacknowledged messages expire after 5 minutes (configurable).
 
 ## Limitations
 
 ### TCP Cannot Detect Sudden Disconnects
 
-When a consumer's network disappears suddenly (e.g., turning off Wi-Fi, entering
-a tunnel, or the app being killed), the relay cannot detect this immediately.
-TCP connections rely on acknowledgments that can take 30+ seconds to fail when
-packets simply vanish into the void.
+When a consumer's network disappears suddenly (Wi-Fi off, tunnel, app killed),
+the relay cannot detect this immediately. TCP acknowledgments can take 30+
+seconds to fail when packets vanish.
 
-**What this means:**
-- The producer may receive `200 OK` even though the consumer never got the data
-- The relay writes the response to its TCP buffer, which succeeds locally
-- Only later does TCP realize the packets never reached the destination
-
-**Why caching is the real safety net:**
-- True delivery confirmation would require application-level acknowledgment
-  (consumer makes a follow-up request), which changes the API significantly
-- Instead, `/link2` caches delivered values for 5 minutes
-- If the consumer's app was killed or lost connection, they can retry and still
-  receive the value from cache
-
-**Design clients accordingly:** Don't assume `200 OK` from the producer means
-the consumer definitely received the data. The consumer should always be prepared
-to retry, and the caching mechanism ensures they can recover.
+This is why `/inbox` uses explicit ACKs: the producer only knows delivery
+succeeded when the consumer calls DELETE. If the consumer crashes before ACKing,
+the message remains available for retry.
 
 ## Development
 
