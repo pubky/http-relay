@@ -10,6 +10,8 @@ with store-and-forward semantics and explicit acknowledgment.
 
 Built primarily for [Pubky](https://pubky.org) applications, but usable as a general-purpose relay.
 
+**[Try the interactive demo](https://pubky.github.io/http-relay/)**
+
 ## What is this?
 
 An HTTP relay enables decoupled communication between distributed services.
@@ -157,7 +159,8 @@ curl http://localhost:8080/inbox/my-channel/ack
 ```
 
 **Responses:**
-- `200 OK` - Body contains `true` (ACKed) or `false` (not ACKed)
+- `200 OK` - Body contains `true` (ACKed) or `false` (pending)
+- `404 Not Found` - No message exists (not posted yet, or expired)
 
 #### GET `/inbox/{id}/await` - Wait for ACK
 

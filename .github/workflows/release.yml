@@ -3,7 +3,6 @@ name: Release
 on:
   push:
     tags: ['v*']
-  pull_request:
     branches: [main]
 
 env:
@@ -110,6 +109,7 @@ jobs:
 
   deploy-demo:
     name: Deploy Demo
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
