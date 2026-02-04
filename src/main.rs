@@ -80,9 +80,15 @@ async fn main() -> Result<()> {
         address = %relay.http_address(),
         "HTTP relay server started"
     );
+    #[cfg(feature = "link-compat")]
     tracing::info!(
         url = %relay.local_url(),
         "Endpoints: /inbox/{{id}} (recommended), /link/{{id}}"
+    );
+    #[cfg(not(feature = "link-compat"))]
+    tracing::info!(
+        url = %relay.local_url(),
+        "Endpoint: /inbox/{{id}}"
     );
 
     tokio::signal::ctrl_c().await?;

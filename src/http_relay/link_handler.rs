@@ -34,7 +34,7 @@ pub async fn get_handler(Path(id): Path<String>, State(state): State<AppState>) 
     // Get message or wait for it
     let result = {
         let mut pending_list = state.pending_list.lock().await;
-        pending_list.get_or_subscribe(&id, state.config.link_timeout)
+        pending_list.get_or_subscribe(&id)
     };
 
     let msg = match result {

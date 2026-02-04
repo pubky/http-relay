@@ -7,23 +7,13 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+
+use super::types::StoredEntry;
+use super::unix_timestamp_millis;
 
 /// Default maximum number of entries before LRU eviction kicks in.
 #[allow(dead_code)]
 pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
-
-/// A stored entry retrieved from the database.
-pub struct StoredEntry {
-    /// The message body (None if entry was acked and body cleared).
-    pub message_body: Option<Vec<u8>>,
-    /// The content type of the message.
-    pub content_type: Option<String>,
-    /// Whether the entry has been acknowledged.
-    pub acked: bool,
-    /// Unix timestamp when the entry expires.
-    pub expires_at: i64,
-}
 
 /// Repository for persisting relay entries to SQLite.
 ///
@@ -86,14 +76,6 @@ impl EntryRepository {
         Ok(())
     }
 
-    /// Returns the current Unix timestamp in milliseconds.
-    fn current_timestamp_millis() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("System time before Unix epoch")
-            .as_millis() as i64
-    }
-
     /// Inserts or replaces an entry in the database.
     ///
     /// If the entry count exceeds `max_entries`, the oldest entry (by created_at)
@@ -112,7 +94,7 @@ impl EntryRepository {
         expires_at: i64,
     ) -> Result<()> {
         let connection = self.connection.lock().expect("Mutex poisoned");
-        let created_at = Self::current_timestamp_millis();
+        let created_at = unix_timestamp_millis();
 
         // Check if we need to evict oldest entry (LRU eviction for disk overflow protection)
         let count: usize = connection
@@ -214,7 +196,7 @@ impl EntryRepository {
     /// Returns the number of entries deleted.
     pub fn cleanup_expired(&self) -> Result<usize> {
         let connection = self.connection.lock().expect("Mutex poisoned");
-        let current_time = Self::current_timestamp_millis();
+        let current_time = unix_timestamp_millis();
 
         let rows_deleted = connection
             .execute("DELETE FROM entries WHERE expires_at < ?1", [current_time])
@@ -247,7 +229,7 @@ mod tests {
     #[test]
     fn test_insert_and_get() {
         let repository = create_test_repository();
-        let expires_at = EntryRepository::current_timestamp_millis() + 3_600_000;
+        let expires_at = unix_timestamp_millis() + 3_600_000;
 
         repository
             .insert("test-id", b"test body", Some("text/plain"), expires_at)
@@ -271,7 +253,7 @@ mod tests {
     #[test]
     fn test_ack() {
         let repository = create_test_repository();
-        let expires_at = EntryRepository::current_timestamp_millis() + 3_600_000;
+        let expires_at = unix_timestamp_millis() + 3_600_000;
 
         repository
             .insert("test-id", b"test body", Some("text/plain"), expires_at)
@@ -296,7 +278,7 @@ mod tests {
     #[test]
     fn test_delete() {
         let repository = create_test_repository();
-        let expires_at = EntryRepository::current_timestamp_millis() + 3_600_000;
+        let expires_at = unix_timestamp_millis() + 3_600_000;
 
         repository
             .insert("test-id", b"test body", None, expires_at)
@@ -320,8 +302,8 @@ mod tests {
     #[test]
     fn test_cleanup_expired() {
         let repository = create_test_repository();
-        let past = EntryRepository::current_timestamp_millis() - 3_600_000;
-        let future = EntryRepository::current_timestamp_millis() + 3_600_000;
+        let past = unix_timestamp_millis() - 3_600_000;
+        let future = unix_timestamp_millis() + 3_600_000;
 
         repository
             .insert("expired", b"old", None, past)
@@ -340,7 +322,7 @@ mod tests {
     #[test]
     fn test_count() {
         let repository = create_test_repository();
-        let expires_at = EntryRepository::current_timestamp_millis() + 3_600_000;
+        let expires_at = unix_timestamp_millis() + 3_600_000;
 
         assert_eq!(repository.count().expect("Failed to count"), 0);
 
@@ -358,7 +340,7 @@ mod tests {
     #[test]
     fn test_lru_eviction() {
         let repository = EntryRepository::new(None, 3).expect("Failed to create repository");
-        let expires_at = EntryRepository::current_timestamp_millis() + 3_600_000;
+        let expires_at = unix_timestamp_millis() + 3_600_000;
 
         repository
             .insert("id1", b"body1", None, expires_at)
@@ -387,7 +369,7 @@ mod tests {
     #[test]
     fn test_insert_or_replace() {
         let repository = create_test_repository();
-        let expires_at = EntryRepository::current_timestamp_millis() + 3_600_000;
+        let expires_at = unix_timestamp_millis() + 3_600_000;
 
         repository
             .insert("test-id", b"original", Some("text/plain"), expires_at)
@@ -407,7 +389,7 @@ mod tests {
     fn test_lru_eviction_does_not_evict_updated_entry() {
         // Regression test: updating the oldest entry at capacity should NOT evict it
         let repository = EntryRepository::new(None, 3).expect("Failed to create repository");
-        let expires_at = EntryRepository::current_timestamp_millis() + 3_600_000;
+        let expires_at = unix_timestamp_millis() + 3_600_000;
 
         // Fill repository to capacity: A is oldest, then B, then C
         repository

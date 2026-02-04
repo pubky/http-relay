@@ -23,9 +23,11 @@ use tokio::sync::Mutex;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use url::Url;
 
+use super::inbox;
+#[cfg(feature = "link-compat")]
+use super::link;
 use super::persistence::EntryRepository;
 use super::waiting_list::WaitingList;
-use super::{inbox, link};
 
 /// The default timeout for link endpoints (synchronous handoff).
 const DEFAULT_LINK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -174,12 +176,8 @@ impl HttpRelay {
     /// Builds the router with all routes and middleware.
     fn build_router(state: AppState) -> Router {
         let max_body_size = state.config.max_body_size;
-        Router::new()
+        let router = Router::new()
             .route("/", get(|| async { "Http Relay" }))
-            .route(
-                "/link/{id}",
-                get(link::get_handler).post(link::post_handler),
-            )
             // Inbox: specific routes first to avoid conflicts with /{id}
             .route("/inbox/{id}/ack", get(inbox::ack_handler))
             .route("/inbox/{id}/await", get(inbox::await_handler))
@@ -188,7 +186,16 @@ impl HttpRelay {
                 get(inbox::get_handler)
                     .post(inbox::post_handler)
                     .delete(inbox::delete_handler),
-            )
+            );
+
+        // Legacy link endpoints (deprecated, opt-in via `link-compat` feature)
+        #[cfg(feature = "link-compat")]
+        let router = router.route(
+            "/link/{id}",
+            get(link::get_handler).post(link::post_handler),
+        );
+
+        router
             .layer(DefaultBodyLimit::max(max_body_size))
             .layer(CorsLayer::very_permissive())
             .layer(TraceLayer::new_for_http())
@@ -270,7 +277,8 @@ impl HttpRelay {
             .expect("hardcoded URL scheme and localhost are always valid")
     }
 
-    /// Returns the localhost URL of Link endpoints
+    /// Returns the localhost URL of Link endpoints (deprecated, use inbox instead).
+    #[cfg(feature = "link-compat")]
     pub fn local_link_url(&self) -> Url {
         let mut url = self.local_url();
 

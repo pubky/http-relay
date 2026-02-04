@@ -65,7 +65,7 @@ pub async fn get_handler(
     // Atomically check for message or subscribe (fixes TOCTOU race)
     let result = {
         let mut pending_list = state.pending_list.lock().await;
-        pending_list.get_or_subscribe(&id, state.config.inbox_cache_ttl)
+        pending_list.get_or_subscribe(&id)
     };
 
     match result {

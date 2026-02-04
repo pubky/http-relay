@@ -4,12 +4,13 @@
 //! Entries are persisted; oneshot channels for waiting requests cannot be persisted.
 
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use axum::body::Bytes;
+use bytes::Bytes;
 use tokio::sync::oneshot;
 
 use super::persistence::EntryRepository;
+use super::unix_timestamp_millis;
 
 /// Bounds concurrent long-poll connections per entry to prevent memory exhaustion.
 /// With 10k entries at 10 waiters each, worst case is ~100k oneshot channels.
@@ -20,7 +21,9 @@ const MAX_WAITERS_PER_ENTRY: usize = 10;
 /// Uses `Bytes` for zero-copy cloning when fanning out to concurrent waiters.
 #[derive(Clone, Debug)]
 pub struct Message {
+    /// The message body bytes.
     pub body: Bytes,
+    /// Optional MIME content type (e.g., "application/json").
     pub content_type: Option<String>,
 }
 
@@ -127,7 +130,7 @@ impl WaitingList {
     /// Returns an error if persistence fails. Waiters are notified regardless
     /// of persistence success (message is delivered but may not survive restart).
     pub fn store(&mut self, id: String, message: Message, ttl: Duration) -> anyhow::Result<()> {
-        let expires_at = Self::unix_timestamp_millis() + ttl.as_millis() as i64;
+        let expires_at = unix_timestamp_millis() + ttl.as_millis() as i64;
 
         // Notify any waiting subscribers before persisting
         if let Some(waiters) = self.waiters.get_mut(&id) {
@@ -225,11 +228,7 @@ impl WaitingList {
     ///
     /// Creates a waiter entry if no message exists, allowing waiters to register
     /// before any message is stored (consumer arrives before producer).
-    pub fn get_or_subscribe(
-        &mut self,
-        id: &str,
-        ttl: Duration,
-    ) -> Result<GetOrSubscribeResult, LimitError> {
+    pub fn get_or_subscribe(&mut self, id: &str) -> Result<GetOrSubscribeResult, LimitError> {
         // Check if entry exists with a message
         if let Ok(Some(entry)) = self.repository.get(id) {
             if !Self::is_expired(entry.expires_at) {
@@ -250,8 +249,6 @@ impl WaitingList {
             .or_insert_with(Waiters::new);
 
         if waiters.add_message_waiter(tx) {
-            // Store TTL for use when message arrives (waiters exist before entry)
-            let _ = ttl; // TTL is used by store() when message arrives
             Ok(GetOrSubscribeResult::Waiting(rx))
         } else {
             Err(LimitError::WaiterLimitReached)
@@ -300,17 +297,9 @@ impl WaitingList {
         count
     }
 
-    /// Returns the current Unix timestamp in milliseconds.
-    fn unix_timestamp_millis() -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("System time before Unix epoch")
-            .as_millis() as i64
-    }
-
     /// Checks if an entry has expired based on its expires_at timestamp (in milliseconds).
     fn is_expired(expires_at: i64) -> bool {
-        Self::unix_timestamp_millis() >= expires_at
+        unix_timestamp_millis() >= expires_at
     }
 }
 
@@ -323,8 +312,14 @@ impl WaitingList {
         Self::new(repository)
     }
 
+    /// Returns the number of entries in the repository.
     pub fn len(&self) -> usize {
         self.repository.count().unwrap_or(0)
+    }
+
+    /// Returns true if the repository is empty.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -390,7 +385,7 @@ mod tests {
         let ttl = Duration::from_secs(60);
 
         // Subscribe for message
-        let result = list.get_or_subscribe("id1", ttl).expect("should succeed");
+        let result = list.get_or_subscribe("id1").expect("should succeed");
         let rx = match result {
             GetOrSubscribeResult::Waiting(rx) => rx,
             GetOrSubscribeResult::Message(_) => panic!("expected waiting"),
@@ -447,15 +442,14 @@ mod tests {
     #[test]
     fn get_or_subscribe_returns_limit_error() {
         let mut list = create_test_list();
-        let ttl = Duration::from_secs(60);
 
         // Subscribe multiple times (no message stored yet)
         for _ in 0..MAX_WAITERS_PER_ENTRY {
-            let result = list.get_or_subscribe("id1", ttl);
+            let result = list.get_or_subscribe("id1");
             assert!(result.is_ok());
         }
 
-        let result = list.get_or_subscribe("id1", ttl);
+        let result = list.get_or_subscribe("id1");
         assert!(
             matches!(result, Err(LimitError::WaiterLimitReached)),
             "expected WaiterLimitReached error"
@@ -539,7 +533,7 @@ mod tests {
         list.store("id1".to_string(), make_message("existing"), ttl)
             .unwrap();
 
-        let result = list.get_or_subscribe("id1", ttl).expect("should succeed");
+        let result = list.get_or_subscribe("id1").expect("should succeed");
 
         match result {
             GetOrSubscribeResult::Message(msg) => {
@@ -554,9 +548,8 @@ mod tests {
     #[test]
     fn get_or_subscribe_returns_receiver_when_no_entry() {
         let mut list = create_test_list();
-        let ttl = Duration::from_secs(60);
 
-        let result = list.get_or_subscribe("id1", ttl).expect("should succeed");
+        let result = list.get_or_subscribe("id1").expect("should succeed");
 
         match result {
             GetOrSubscribeResult::Message(_) => {
@@ -574,7 +567,7 @@ mod tests {
         let mut list = create_test_list();
         let ttl = Duration::from_secs(60);
 
-        let result = list.get_or_subscribe("id1", ttl).expect("should succeed");
+        let result = list.get_or_subscribe("id1").expect("should succeed");
         let rx = match result {
             GetOrSubscribeResult::Waiting(rx) => rx,
             GetOrSubscribeResult::Message(_) => panic!("should be waiting"),
@@ -591,16 +584,13 @@ mod tests {
     async fn get_or_subscribe_ignores_expired_message() {
         let mut list = create_test_list();
         let short_ttl = Duration::from_millis(10);
-        let long_ttl = Duration::from_secs(60);
 
         list.store("id1".to_string(), make_message("expired"), short_ttl)
             .unwrap();
 
         sleep(Duration::from_millis(20)).await;
 
-        let result = list
-            .get_or_subscribe("id1", long_ttl)
-            .expect("should succeed");
+        let result = list.get_or_subscribe("id1").expect("should succeed");
 
         match result {
             GetOrSubscribeResult::Message(_) => {
@@ -622,7 +612,7 @@ mod tests {
 
         // Consumer subscribes - no entry in DB yet
         let result = list
-            .get_or_subscribe("consumer-first", ttl)
+            .get_or_subscribe("consumer-first")
             .expect("should succeed");
         let rx = match result {
             GetOrSubscribeResult::Waiting(rx) => rx,
@@ -668,11 +658,10 @@ mod tests {
     #[tokio::test]
     async fn cleanup_removes_closed_senders() {
         let mut list = create_test_list();
-        let ttl = Duration::from_secs(60);
 
         // Subscribe but immediately drop the receiver (simulates timeout)
         let result = list
-            .get_or_subscribe("dropped-receiver", ttl)
+            .get_or_subscribe("dropped-receiver")
             .expect("should succeed");
         match result {
             GetOrSubscribeResult::Waiting(rx) => drop(rx), // Receiver dropped
