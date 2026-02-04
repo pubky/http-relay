@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     tags: ['v*']
+  pull_request:
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -10,6 +12,7 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.name }}
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -104,3 +107,46 @@ jobs:
         with:
           files: artifacts/*
           generate_release_notes: true
+
+  deploy-demo:
+    name: Deploy Demo
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: demo/package-lock.json
+
+      - name: Install dependencies
+        working-directory: demo
+        run: npm ci
+
+      - name: Build
+        working-directory: demo
+        run: npm run build
+        env:
+          NEXT_PUBLIC_RELAY_URL: https://httprelay.pubky.app
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: demo/out
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

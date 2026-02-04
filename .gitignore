@@ -33,3 +33,7 @@ Cargo.lock
 *.tmp
 
 cache.sqlite*
+
+# Demo (Next.js)
+demo/.next/
+demo/out/
