@@ -1,6 +1,6 @@
 # HTTP Relay Demo
 
-A simple web UI to test the http-relay `/link2` endpoint.
+A simple web UI to test the http-relay `/inbox` endpoint.
 
 ## Quick Start
 
@@ -17,12 +17,21 @@ Open http://localhost:3000
 
 ## Usage
 
-1. **Set Channel ID** - Click "Random" or enter your own
-2. **Start Consumer** - Waits for a message on the channel
-3. **Send from Producer** - Delivers message to the waiting consumer
-4. **Watch the log** - See the request/response flow
+1. **Set Channel ID** — Click "Random" or enter your own
+2. **Producer** — Type a message and POST it to the channel
+3. **Consumer** — Long-poll for the message, then send an ACK
+4. **Producer (optional)** — Check or await the ACK
+5. **Watch the log** — See the request/response flow
 
-The consumer and producer retry automatically on 408 timeouts until they connect.
+## Endpoints
+
+| Method | Endpoint | Role | Purpose |
+|--------|----------|------|---------|
+| POST | `/inbox/{id}` | Producer | Store a message |
+| GET | `/inbox/{id}` | Consumer | Long-poll for message (408 on timeout) |
+| DELETE | `/inbox/{id}` | Consumer | Acknowledge receipt |
+| GET | `/inbox/{id}/ack` | Producer | Check ACK status |
+| GET | `/inbox/{id}/await` | Producer | Long-poll until ACKed (408 on timeout) |
 
 ## Sharing Channels
 
@@ -49,10 +58,6 @@ Or via URL query param:
 ```
 http://localhost:3000?relay=https://relay.example.com
 ```
-
-### Endpoint
-
-Toggle between `/link2` (recommended, with caching) and `/link` (deprecated) in the UI.
 
 ### Channel ID
 
