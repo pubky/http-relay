@@ -506,11 +506,7 @@ mod tests {
         // Fill all 10 ack waiter slots
         let mut receivers = Vec::new();
         for _ in 0..10 {
-            let rx = state
-                .pending_list
-                .lock()
-                .await
-                .subscribe_ack("await-limit");
+            let rx = state.pending_list.lock().await.subscribe_ack("await-limit");
             receivers.push(rx);
         }
 
