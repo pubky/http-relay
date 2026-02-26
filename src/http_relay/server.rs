@@ -319,4 +319,29 @@ mod tests {
         assert_eq!(response.status_code(), 200);
         assert_eq!(response.text(), "Http Relay");
     }
+
+    /// Tests the full HttpRelay::start() lifecycle: bind, serve, respond, shutdown.
+    /// This covers the real server startup path that create_test_server() bypasses.
+    #[tokio::test]
+    async fn test_start_and_shutdown() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let relay = HttpRelay::start(Config::default()).await.unwrap();
+        let addr = relay.http_address();
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response).await.unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(response.contains("Http Relay"));
+
+        relay.shutdown().await.unwrap();
+    }
 }

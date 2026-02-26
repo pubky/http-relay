@@ -276,6 +276,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_waiter_limit() {
+        let config = Config {
+            link_timeout: Duration::from_millis(100),
+            ..Config::default()
+        };
+        let (server, state) = HttpRelay::create_test_server(config);
+
+        // Fill all 10 message waiter slots
+        let mut receivers = Vec::new();
+        for _ in 0..10 {
+            let result = state
+                .pending_list
+                .lock()
+                .await
+                .get_or_subscribe("get-limit");
+            receivers.push(result);
+        }
+
+        // 11th GET via HTTP should get 503
+        let response = server.get("/link/get-limit").await;
+        assert_eq!(response.status_code(), 503);
+    }
+
+    #[tokio::test]
     async fn test_deprecation_header() {
         let config = Config {
             link_timeout: Duration::from_millis(100),

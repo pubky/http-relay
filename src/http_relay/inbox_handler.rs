@@ -468,6 +468,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_get_waiter_limit() {
+        let config = Config {
+            inbox_timeout: Duration::from_millis(100),
+            ..Config::default()
+        };
+        let (server, state) = HttpRelay::create_test_server(config);
+
+        // Fill all 10 message waiter slots
+        let mut receivers = Vec::new();
+        for _ in 0..10 {
+            let result = state
+                .pending_list
+                .lock()
+                .await
+                .get_or_subscribe("waiter-limit");
+            receivers.push(result);
+        }
+
+        // 11th request via HTTP should get 503
+        let response = server.get("/inbox/waiter-limit").await;
+        assert_eq!(response.status_code(), 503);
+    }
+
+    #[tokio::test]
+    async fn test_await_waiter_limit() {
+        let config = Config {
+            inbox_timeout: Duration::from_millis(100),
+            ..Config::default()
+        };
+        let (server, state) = HttpRelay::create_test_server(config);
+
+        // POST a message so the entry exists for subscribe_ack
+        let body = Bytes::from_static(b"limit test");
+        server.post("/inbox/await-limit").bytes(body).await;
+
+        // Fill all 10 ack waiter slots
+        let mut receivers = Vec::new();
+        for _ in 0..10 {
+            let rx = state
+                .pending_list
+                .lock()
+                .await
+                .subscribe_ack("await-limit");
+            receivers.push(rx);
+        }
+
+        // 11th await request via HTTP should get 503
+        let response = server.get("/inbox/await-limit/await").await;
+        assert_eq!(response.status_code(), 503);
+    }
+
+    #[tokio::test]
     async fn test_message_expires() {
         let config = Config {
             inbox_cache_ttl: Duration::from_millis(50),

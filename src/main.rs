@@ -99,8 +99,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn init_tracing(verbose: u8, quiet: bool) {
-    let level = if quiet {
+fn log_level(verbose: u8, quiet: bool) -> LevelFilter {
+    if quiet {
         LevelFilter::OFF
     } else {
         match verbose {
@@ -109,14 +109,46 @@ fn init_tracing(verbose: u8, quiet: bool) {
             2 => LevelFilter::DEBUG,
             _ => LevelFilter::TRACE,
         }
-    };
+    }
+}
 
+fn init_tracing(verbose: u8, quiet: bool) {
     let filter = EnvFilter::builder()
-        .with_default_directive(level.into())
+        .with_default_directive(log_level(verbose, quiet).into())
         .from_env_lossy();
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quiet_overrides_verbose() {
+        assert_eq!(log_level(3, true), LevelFilter::OFF);
+    }
+
+    #[test]
+    fn test_default_is_warn() {
+        assert_eq!(log_level(0, false), LevelFilter::WARN);
+    }
+
+    #[test]
+    fn test_verbose_info() {
+        assert_eq!(log_level(1, false), LevelFilter::INFO);
+    }
+
+    #[test]
+    fn test_verbose_debug() {
+        assert_eq!(log_level(2, false), LevelFilter::DEBUG);
+    }
+
+    #[test]
+    fn test_verbose_trace() {
+        assert_eq!(log_level(3, false), LevelFilter::TRACE);
+    }
 }
