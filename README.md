@@ -35,7 +35,7 @@ messages persist until the consumer explicitly acknowledges receipt.
 - **Delivery confirmation** - Producers can block until consumer ACKs, or check status
 - **Mobile-friendly timeouts** - 25s default stays under typical proxy limits (nginx, Cloudflare)
 - **Content-Type preservation** - Forwards producer's Content-Type to consumer
-- **Legacy compatibility** - `/link/{id}` endpoint for existing integrations
+- **Legacy compatibility** - `/link/{id}` endpoint for existing integrations. [See old codebase](https://github.com/pubky/pubky-core/tree/4e988542c4297030358cab62c241be75480d9a06/http-relay)
 
 ## Installation
 
@@ -112,9 +112,18 @@ The primary API. Store-and-forward with explicit acknowledgment.
 | `GET` | `/inbox/{id}/ack` | Returns `true` or `false` (was message ACKed?) |
 | `GET` | `/inbox/{id}/await` | Block until ACKed (25s default timeout) |
 
+
+**Inbox IDs act as shared secrets.** Anyone who knows an ID can read/write/ACK
+that inbox. IDs should be cryptographically random (e.g., 128-bit UUIDs).
+Predictable IDs allow attackers to intercept or acknowledge messages.
+Messages persist in plaintext memory for the TTL duration. Do not relay
+sensitive one-time credentials unless encryption is applied at the
+application layer.
+
 #### POST `/inbox/{id}` - Store Message
 
 Producer stores a message. Returns immediately without waiting for a consumer.
+New value overrides the old value if it already exists.
 
 ```bash
 curl -X POST http://localhost:8080/inbox/my-channel \
