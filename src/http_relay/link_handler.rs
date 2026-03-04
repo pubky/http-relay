@@ -21,7 +21,7 @@ use axum::{
 #[cfg(test)]
 use super::response::MAX_ID_LENGTH;
 use super::response::{build_response, validate_id_length};
-use super::waiting_list::{GetOrSubscribeResult, LimitError, Message};
+use super::waiting_list::{GetOrSubscribeResult, Message, SubscribeError};
 use super::AppState;
 
 /// GET /link/{id} - Consumer waits for producer, auto-ACKs on receive.
@@ -54,13 +54,15 @@ pub async fn get_handler(Path(id): Path<String>, State(state): State<AppState>) 
                 }
             }
         }
-        Err(LimitError::WaiterLimitReached) => {
+        Err(SubscribeError::WaiterLimitReached) => {
             return build_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Too many concurrent requests".into(),
                 None,
             );
         }
+        // get_or_subscribe creates a waiter when no entry exists, so NotFound is unreachable
+        Err(SubscribeError::NotFound) => unreachable!(),
     };
 
     // Auto-ACK to signal producer that consumer received the message
@@ -110,7 +112,7 @@ pub async fn post_handler(
         // Subscribe to get notified when consumer ACKs
         match pending_list.subscribe_ack(&id) {
             Ok(rx) => rx,
-            Err(None) => {
+            Err(SubscribeError::NotFound) => {
                 // Entry was immediately evicted (shouldn't happen normally)
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
@@ -118,7 +120,7 @@ pub async fn post_handler(
                 )
                     .into_response();
             }
-            Err(Some(LimitError::WaiterLimitReached)) => {
+            Err(SubscribeError::WaiterLimitReached) => {
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
                     Bytes::from("Too many concurrent requests"),

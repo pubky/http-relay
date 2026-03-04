@@ -37,7 +37,7 @@ pub use server::{HttpRelay, HttpRelayBuilder};
 // Re-export core types for library users (available without server feature)
 pub use persistence::EntryRepository;
 pub use types::StoredEntry;
-pub use waiting_list::{GetOrSubscribeResult, LimitError, Message, WaitingList};
+pub use waiting_list::{GetOrSubscribeResult, Message, SubscribeError, WaitingList};
 
 /// Returns the current Unix timestamp in milliseconds.
 pub(crate) fn unix_timestamp_millis() -> i64 {

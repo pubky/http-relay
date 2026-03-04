@@ -20,7 +20,7 @@ use axum::{
 #[cfg(test)]
 use super::response::MAX_ID_LENGTH;
 use super::response::{build_response, validate_id_length};
-use super::waiting_list::{GetOrSubscribeResult, LimitError, Message};
+use super::waiting_list::{GetOrSubscribeResult, Message, SubscribeError};
 use super::AppState;
 
 /// POST /inbox/{id} - Store a message, return 200 immediately.
@@ -83,11 +83,13 @@ pub async fn get_handler(
                 ),
             }
         }
-        Err(LimitError::WaiterLimitReached) => build_response(
+        Err(SubscribeError::WaiterLimitReached) => build_response(
             StatusCode::SERVICE_UNAVAILABLE,
             "Too many concurrent requests".into(),
             None,
         ),
+        // get_or_subscribe creates a waiter when no entry exists, so NotFound is unreachable
+        Err(SubscribeError::NotFound) => unreachable!(),
     }
 }
 
@@ -138,11 +140,10 @@ pub async fn await_handler(
 
         match pending_list.subscribe_ack(&id) {
             Ok(rx) => rx,
-            Err(None) => {
-                // Entry doesn't exist or expired
+            Err(SubscribeError::NotFound) => {
                 return Ok((StatusCode::NOT_FOUND, Bytes::from("Not found")));
             }
-            Err(Some(LimitError::WaiterLimitReached)) => {
+            Err(SubscribeError::WaiterLimitReached) => {
                 return Ok((
                     StatusCode::SERVICE_UNAVAILABLE,
                     Bytes::from("Too many concurrent requests"),

@@ -98,11 +98,13 @@ pub struct WaitingList {
     waiters: HashMap<String, Waiters>,
 }
 
-/// Error returned when a limit is reached.
+/// Error returned when subscribing to a waiting list entry fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LimitError {
+pub enum SubscribeError {
     /// Maximum waiters per entry reached.
     WaiterLimitReached,
+    /// Entry not found or expired.
+    NotFound,
 }
 
 /// Result of get_or_subscribe operation.
@@ -193,13 +195,13 @@ impl WaitingList {
 
     /// Subscribes to receive notification when this entry is ACKed.
     ///
-    /// Returns `Err(None)` if entry missing/expired, `Err(Some(LimitError))` if
-    /// waiter limit reached.
-    pub fn subscribe_ack(&mut self, id: &str) -> Result<oneshot::Receiver<()>, Option<LimitError>> {
+    /// Returns `Err(SubscribeError::NotFound)` if entry missing/expired,
+    /// `Err(SubscribeError::WaiterLimitReached)` if waiter limit reached.
+    pub fn subscribe_ack(&mut self, id: &str) -> Result<oneshot::Receiver<()>, SubscribeError> {
         // Check if entry exists and is not expired
         let entry = match self.repository.get(id) {
             Ok(Some(entry)) if !Self::is_expired(entry.expires_at) => entry,
-            _ => return Err(None),
+            _ => return Err(SubscribeError::NotFound),
         };
 
         // If already acked, create a channel and immediately notify
@@ -217,7 +219,7 @@ impl WaitingList {
         if waiters.add_ack_waiter(tx) {
             Ok(rx)
         } else {
-            Err(Some(LimitError::WaiterLimitReached))
+            Err(SubscribeError::WaiterLimitReached)
         }
     }
 
@@ -228,7 +230,7 @@ impl WaitingList {
     ///
     /// Creates a waiter entry if no message exists, allowing waiters to register
     /// before any message is stored (consumer arrives before producer).
-    pub fn get_or_subscribe(&mut self, id: &str) -> Result<GetOrSubscribeResult, LimitError> {
+    pub fn get_or_subscribe(&mut self, id: &str) -> Result<GetOrSubscribeResult, SubscribeError> {
         // Check if entry exists with a message
         if let Ok(Some(entry)) = self.repository.get(id) {
             if !Self::is_expired(entry.expires_at) {
@@ -251,7 +253,7 @@ impl WaitingList {
         if waiters.add_message_waiter(tx) {
             Ok(GetOrSubscribeResult::Waiting(rx))
         } else {
-            Err(LimitError::WaiterLimitReached)
+            Err(SubscribeError::WaiterLimitReached)
         }
     }
 
@@ -434,7 +436,7 @@ mod tests {
 
         let result = list.subscribe_ack("id1");
         assert!(
-            matches!(result, Err(Some(LimitError::WaiterLimitReached))),
+            matches!(result, Err(SubscribeError::WaiterLimitReached)),
             "expected WaiterLimitReached error"
         );
     }
@@ -451,7 +453,7 @@ mod tests {
 
         let result = list.get_or_subscribe("id1");
         assert!(
-            matches!(result, Err(LimitError::WaiterLimitReached)),
+            matches!(result, Err(SubscribeError::WaiterLimitReached)),
             "expected WaiterLimitReached error"
         );
     }
