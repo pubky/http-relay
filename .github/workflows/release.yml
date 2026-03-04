@@ -138,6 +138,7 @@ jobs:
         run: npm run build
         env:
           NEXT_PUBLIC_RELAY_URL: https://httprelay.pubky.app
+          NEXT_PUBLIC_BASE_PATH: /http-relay
 
       - name: Add .nojekyll
         run: touch demo/out/.nojekyll
