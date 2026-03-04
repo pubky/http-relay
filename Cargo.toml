@@ -1,24 +1,56 @@
 [package]
 name = "http-relay"
 description = "A Rust implementation of _some_ of [Http relay spec](https://httprelay.io/)."
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
-authors = ["SeverinAlexB", "SHAcollision", "Nuh"]
+authors = ["SeverinAlexB"]
 license = "MIT"
-homepage = "https://github.com/pubky/pubky-http-relay"
-repository = "https://github.com/pubky/pubky-http-relay"
+homepage = "https://github.com/pubky/http-relay"
+repository = "https://github.com/pubky/http-relay"
 keywords = ["httprelay", "http", "relay"]
 categories = ["web-programming"]
 
 [dependencies]
-anyhow = "1.0.99"
-axum = "0.8.6"
-axum-server = "0.7.2"
+anyhow = "1.0.100"
+bytes = "1"
 futures-util = "0.3.31"
-tokio = { version = "1.47.1", features = ["full"] }
-tracing = "0.1.41"
-url = "2.5.4"
-tower-http = { version = "0.6.6", features = ["cors", "trace"] }
+tokio = { version = "1.49.0", features = ["full"] }
+tracing = "0.1.44"
+
+# Optional: server feature
+axum = { version = "0.8.8", optional = true }
+http-body = { version = "1.0", optional = true }
+axum-server = { version = "0.8.0", optional = true }
+tower-http = { version = "0.6.8", features = ["cors", "trace"], optional = true }
+url = { version = "2.5.8", optional = true }
+
+# Optional: persist feature
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+
+# Optional: CLI (binary only)
+clap = { version = "4", features = ["derive"], optional = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+[features]
+default = ["cli", "persist", "link-compat"]
+
+# HTTP server (axum + handlers + middleware)
+server = ["dep:axum", "dep:http-body", "dep:axum-server", "dep:tower-http", "dep:url"]
+
+# SQLite persistence (without this: in-memory HashMap storage)
+persist = ["dep:rusqlite"]
+
+# Legacy /link/{id} endpoint compatibility (deprecated)
+link-compat = []
+
+# CLI binary
+cli = ["dep:clap", "dep:tracing-subscriber", "server"]
+
+[[bin]]
+name = "http-relay"
+path = "src/main.rs"
+required-features = ["cli"]
 
 [dev-dependencies]
-axum-test = "17.3.0"
+axum-test = "18.7.0"
+http-body-util = "0.1"

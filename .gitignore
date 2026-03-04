@@ -32,5 +32,13 @@ Cargo.lock
 *.bak
 *.tmp
 
+cache.sqlite*
 
+# Demo (Next.js)
+demo/.next/
+demo/out/
+
+# Claude Code
 .claude/
+
+lcov.info
