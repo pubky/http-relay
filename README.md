@@ -363,3 +363,6 @@ cargo test
 RUST_LOG=debug cargo run
 ```
 
+## Releasing
+
+See [RELEASING.md](RELEASING.md) for how to publish a new version.
