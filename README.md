@@ -18,11 +18,6 @@ An HTTP relay enables decoupled communication between distributed services.
 Producers POST messages to a channel; consumers GET them. The relay handles
 the coordination, storage, and delivery confirmation.
 
-**The problem it solves:** When a mobile app requests data and then gets
-backgrounded or killed by the OS, the HTTP response never arrives—but from
-the server's perspective, it was sent successfully. This relay ensures
-messages persist until the consumer explicitly acknowledges receipt.
-
 **Use cases:**
 - Mobile apps that need reliable message delivery despite OS backgrounding
 - Services that can't communicate directly (NAT traversal, firewall bypass)
