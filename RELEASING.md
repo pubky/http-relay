@@ -10,7 +10,7 @@
 
 ### 1. Bump the version and create version PR
 
-Make sure you are working on the most recent master/main branch.
+Make sure you are working on the most recent main branch.
 
 Update the version in `Cargo.toml`:
 
@@ -42,8 +42,8 @@ PR description: Changelogs
 After the PR has been merged, tag the commit.
 
 ```bash
-git checkout master
-git pull origin master
+git checkout main
+git pull origin main
 git tag v0.7.0
 git push origin v0.7.0
 ```
