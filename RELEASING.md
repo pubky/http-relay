@@ -8,7 +8,9 @@
 
 ## Release Steps
 
-### 1. Bump the version
+### 1. Bump the version and create version PR
+
+Make sure you are working on the most recent master/main branch.
 
 Update the version in `Cargo.toml`:
 
@@ -23,17 +25,25 @@ Then update the lockfile:
 cargo check
 ```
 
-### 2. Commit and push to main
+Create the version PR:
 
 ```bash
+git checkout -b chore/v0.7.0
 git add Cargo.toml Cargo.lock
 git commit -m "release: v0.7.0"
-git push origin main
+git push origin chore/v0.7.0
 ```
 
-### 3. Tag and push
+PR title: chore: v0.7.0
+PR description: Changelogs
+
+### 2. Tag and push
+
+After the PR has been merged, tag the commit.
 
 ```bash
+git checkout master
+git pull origin master
 git tag v0.7.0
 git push origin v0.7.0
 ```
