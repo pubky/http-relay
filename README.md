@@ -71,6 +71,7 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
 | `--max-entries <N>` | Max entries in waiting list | `10000` |
 | `--persist-db <PATH>` | SQLite database path for persistence | (in-memory) |
+| `--cors-allow-all` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) | off |
 | `-v` | Verbosity (repeat for more) | warn |
 | `-q, --quiet` | Silence output | - |
 

@@ -53,6 +53,10 @@ struct Args {
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 
+    /// Enable permissive CORS headers (Access-Control-Allow-Origin: *)
+    #[arg(long)]
+    cors_allow_all: bool,
+
     /// Silence all output
     #[arg(short, long)]
     quiet: bool,
@@ -73,6 +77,7 @@ async fn main() -> Result<()> {
         .max_body_size(args.max_body_size)
         .max_entries(args.max_entries)
         .persist_db(args.persist_db)
+        .cors_allow_all(args.cors_allow_all)
         .run()
         .await?;
 
