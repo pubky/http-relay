@@ -343,9 +343,9 @@ mod tests {
             .get("/")
             .add_header("Origin", "https://example.com")
             .await;
-        assert!(
-            response.maybe_header("access-control-allow-origin").is_some(),
-        );
+        assert!(response
+            .maybe_header("access-control-allow-origin")
+            .is_some(),);
     }
 
     #[tokio::test]
@@ -359,9 +359,9 @@ mod tests {
             .get("/")
             .add_header("Origin", "https://example.com")
             .await;
-        assert!(
-            response.maybe_header("access-control-allow-origin").is_none(),
-        );
+        assert!(response
+            .maybe_header("access-control-allow-origin")
+            .is_none(),);
     }
 
     /// Tests the full HttpRelay::start() lifecycle: bind, serve, respond, shutdown.
