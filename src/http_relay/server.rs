@@ -2,10 +2,10 @@
 //!
 //! # CORS Configuration
 //!
-//! This server uses permissive CORS (`Access-Control-Allow-Origin: *`) to allow
-//! web browsers to communicate from any origin. This is intentional for public
-//! relay deployments. For restricted environments, modify `CorsLayer::very_permissive()`
-//! in `build_router()`.
+//! By default, this server uses permissive CORS (`Access-Control-Allow-Origin: *`) to allow
+//! web browsers to communicate from any origin. This is intentional for public relay deployments.
+//! For restricted environments behind a reverse proxy (nginx, caddy), use `--no-cors` to disable
+//! relay-level CORS headers and configure CORS at the proxy instead.
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
@@ -85,6 +85,9 @@ pub(crate) struct Config {
     /// Path to SQLite database for persistent storage.
     /// If None, uses in-memory storage (data lost on restart).
     pub persist_db: Option<PathBuf>,
+    /// When true, no CORS headers are added. Useful when running behind a reverse proxy
+    /// that handles CORS (nginx, caddy, etc.).
+    pub no_cors: bool,
 }
 
 impl Default for Config {
@@ -98,6 +101,7 @@ impl Default for Config {
             max_body_size: DEFAULT_MAX_BODY_SIZE,
             max_entries: DEFAULT_MAX_ENTRIES,
             persist_db: None,
+            no_cors: false,
         }
     }
 }
@@ -160,6 +164,12 @@ impl HttpRelayBuilder {
         self
     }
 
+    /// Disable CORS headers. Useful when running behind a reverse proxy that handles CORS.
+    pub fn no_cors(mut self, no_cors: bool) -> Self {
+        self.0.no_cors = no_cors;
+        self
+    }
+
     /// Start running an HTTP relay.
     pub async fn run(self) -> Result<HttpRelay> {
         HttpRelay::start(self.0).await
@@ -195,11 +205,17 @@ impl HttpRelay {
             get(link::get_handler).post(link::post_handler),
         );
 
-        router
+        let router = router
             .layer(DefaultBodyLimit::max(max_body_size))
-            .layer(CorsLayer::very_permissive())
-            .layer(TraceLayer::new_for_http())
-            .with_state(state)
+            .layer(TraceLayer::new_for_http());
+
+        let router = if state.config.no_cors {
+            router
+        } else {
+            router.layer(CorsLayer::very_permissive())
+        };
+
+        router.with_state(state)
     }
 
     /// Creates the HTTP router for the HTTP relay.
@@ -318,6 +334,34 @@ mod tests {
         let response = server.get("/").await;
         assert_eq!(response.status_code(), 200);
         assert_eq!(response.text(), "Http Relay");
+    }
+
+    #[tokio::test]
+    async fn test_cors_permissive_by_default() {
+        let (server, _state) = HttpRelay::create_test_server(Config::default());
+        let response = server
+            .get("/")
+            .add_header("Origin", "https://example.com")
+            .await;
+        assert!(
+            response.maybe_header("access-control-allow-origin").is_some(),
+        );
+    }
+
+    #[tokio::test]
+    async fn test_no_cors_removes_headers() {
+        let config = Config {
+            no_cors: true,
+            ..Config::default()
+        };
+        let (server, _state) = HttpRelay::create_test_server(config);
+        let response = server
+            .get("/")
+            .add_header("Origin", "https://example.com")
+            .await;
+        assert!(
+            response.maybe_header("access-control-allow-origin").is_none(),
+        );
     }
 
     /// Tests the full HttpRelay::start() lifecycle: bind, serve, respond, shutdown.

@@ -53,6 +53,10 @@ struct Args {
     #[arg(short, long, action = clap::ArgAction::Count)]
     verbose: u8,
 
+    /// Disable CORS headers (useful when running behind a reverse proxy that handles CORS)
+    #[arg(long)]
+    no_cors: bool,
+
     /// Silence all output
     #[arg(short, long)]
     quiet: bool,
@@ -73,6 +77,7 @@ async fn main() -> Result<()> {
         .max_body_size(args.max_body_size)
         .max_entries(args.max_entries)
         .persist_db(args.persist_db)
+        .no_cors(args.no_cors)
         .run()
         .await?;
 
