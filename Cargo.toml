@@ -3,6 +3,7 @@ name = "http-relay"
 description = "A Rust implementation of _some_ of [Http relay spec](https://httprelay.io/)."
 version = "0.7.0"
 edition = "2021"
+rust-version = "1.85"
 authors = ["SeverinAlexB"]
 license = "MIT"
 homepage = "https://github.com/pubky/http-relay"
