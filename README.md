@@ -30,7 +30,7 @@ the coordination, storage, and delivery confirmation.
 - **Delivery confirmation** - Producers can block until consumer ACKs, or check status
 - **Mobile-friendly timeouts** - 25s default stays under typical proxy limits (nginx, Cloudflare)
 - **Content-Type preservation** - Forwards producer's Content-Type to consumer
-- **Legacy compatibility** - `/link/{id}` endpoint for existing integrations. [See old codebase](https://github.com/pubky/pubky-core/tree/4e988542c4297030358cab62c241be75480d9a06/http-relay)
+- **Legacy compatibility** - `/link/{id}` endpoint for existing integrations. [See old codebase](https://github.com/pubky/pubky-homeserver/tree/4e988542c4297030358cab62c241be75480d9a06/http-relay)
 
 ## Installation
 
