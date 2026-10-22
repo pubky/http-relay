@@ -12,7 +12,7 @@ keywords = ["httprelay", "http", "relay"]
 categories = ["web-programming"]
 
 [dependencies]
-anyhow = "1.0.100"
+anyhow = "1.0.103"
 bytes = "1"
 futures-util = "0.3.31"
 tokio = { version = "1.49.0", features = ["full"] }
