@@ -1,5 +1,11 @@
 //! HTTP relay server implementation.
 //!
+//! # Deployment assumptions
+//!
+//! The relay expects to run behind a reverse proxy that terminates TLS and limits
+//! request rates and connections per client IP. The relay itself has no
+//! authentication and no per-client limits. See "Deploy in production" in the README.
+//!
 //! # CORS Configuration
 //!
 //! By default, no CORS headers are added. This is suitable for deployments behind a reverse
