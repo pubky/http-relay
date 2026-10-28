@@ -5,6 +5,12 @@
 //! By default, no CORS headers are added. This is suitable for deployments behind a reverse
 //! proxy (nginx, caddy) that manages CORS. Use `--cors-allow-all` to enable permissive CORS
 //! (`Access-Control-Allow-Origin: *`), which allows web browsers to communicate from any origin.
+//!
+//! # Logging
+//!
+//! Inbox and link IDs are shared secrets (see the security section of the inbox handler).
+//! Never log an ID or a raw request URI, which contains the ID. Log route templates such as
+//! `/inbox/{id}` instead; see [`request_span`].
 
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener},
@@ -15,7 +21,11 @@ use std::{
 
 use anyhow::Result;
 
-use axum::{extract::DefaultBodyLimit, routing::get, Router};
+use axum::{
+    extract::{DefaultBodyLimit, MatchedPath, Request},
+    routing::get,
+    Router,
+};
 use axum_server::Handle;
 use tokio::sync::Mutex;
 
@@ -102,6 +112,25 @@ impl Default for Config {
             cors_allow_all: false,
         }
     }
+}
+
+/// Creates the DEBUG-level tracing span for one HTTP request.
+///
+/// Replaces tower-http's default span, which records the full URI. The URI path contains the
+/// inbox or link ID, and IDs are shared secrets, so the span records the matched route template
+/// (for example `/inbox/{id}`) instead. Requests that match no route get no `route` field rather
+/// than falling back to the raw URI.
+fn request_span(request: &Request) -> tracing::Span {
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(MatchedPath::as_str);
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        route,
+        version = ?request.version(),
+    )
 }
 
 /// Builder for [HttpRelay].
@@ -205,7 +234,7 @@ impl HttpRelay {
 
         let router = router
             .layer(DefaultBodyLimit::max(max_body_size))
-            .layer(TraceLayer::new_for_http());
+            .layer(TraceLayer::new_for_http().make_span_with(request_span));
 
         let router = if state.config.cors_allow_all {
             router.layer(CorsLayer::very_permissive())
@@ -360,6 +389,67 @@ mod tests {
         assert!(response
             .maybe_header("access-control-allow-origin")
             .is_some(),);
+    }
+
+    /// Runs `send_requests` against a fresh test server and returns everything logged at DEBUG
+    /// level or above while it ran.
+    async fn capture_request_logs<F, Fut>(send_requests: F) -> String
+    where
+        F: FnOnce(axum_test::TestServer) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        #[derive(Clone, Default)]
+        struct SharedBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for SharedBuffer {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buffer = SharedBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        // The test server calls the router in-process on this thread, so a thread-local
+        // subscriber sees every request span.
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (server, _state) = HttpRelay::create_test_server(Config::default());
+        send_requests(server).await;
+
+        let logs = buffer.0.lock().unwrap().clone();
+        String::from_utf8(logs).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_request_logs_route_template_instead_of_id() {
+        let logs = capture_request_logs(|server| async move {
+            server.post("/inbox/secret-id-123").text("hello").await;
+        })
+        .await;
+
+        assert!(logs.contains("/inbox/{id}"), "logs: {logs}");
+        assert!(!logs.contains("secret-id-123"), "logs: {logs}");
+    }
+
+    #[tokio::test]
+    async fn test_unmatched_request_logs_no_path() {
+        let logs = capture_request_logs(|server| async move {
+            server.get("/unknown/secret-id-123").expect_failure().await;
+        })
+        .await;
+
+        assert!(logs.contains("started processing request"), "logs: {logs}");
+        assert!(!logs.contains("secret-id-123"), "logs: {logs}");
     }
 
     /// Tests the full HttpRelay::start() lifecycle: bind, serve, respond, shutdown.

@@ -5,6 +5,7 @@
 //! Inbox IDs act as shared secrets. Anyone who knows an ID can read/write/ACK
 //! that inbox. IDs must be cryptographically random (e.g., 128-bit UUIDs).
 //! Predictable IDs allow attackers to intercept or acknowledge messages.
+//! For the same reason, never write an ID to the logs.
 //!
 //! Messages persist in plaintext memory for the TTL duration. Do not relay
 //! sensitive one-time credentials unless encryption is applied at the

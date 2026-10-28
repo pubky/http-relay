@@ -168,7 +168,8 @@ impl WaitingList {
 
         // Persist the ACK
         if let Err(e) = self.repository.ack(id) {
-            tracing::error!(?e, id, "Failed to ack entry in repository");
+            // No `id` field: IDs are shared secrets and must not reach the logs.
+            tracing::error!(?e, "Failed to ack entry in repository");
             return false;
         }
 
