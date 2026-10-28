@@ -1,5 +1,7 @@
 //! HTTP Relay server executable.
 
+#![forbid(unsafe_code)]
+
 use std::{net::IpAddr, path::PathBuf, time::Duration};
 
 use anyhow::Result;
