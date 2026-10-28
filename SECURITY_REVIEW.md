@@ -18,11 +18,14 @@ A review has two parts:
 
 ## Prerequisites
 
-Install cargo-deny:
+Install or update cargo-deny:
 
 ```bash
 cargo install --locked cargo-deny
 ```
+
+Run this again before each review. CI always uses the latest release, and older
+versions can miss advisories that CI reports.
 
 ## 1. Check dependencies
 
@@ -70,8 +73,10 @@ Run an AI-assisted review of the code in `src/`.
    cargo update -p <crate>
    ```
 
-   Replace `<crate>` with the affected crate's name. If the fix needs a new major
-   version, update `Cargo.toml` first.
+   Replace `<crate>` with the affected crate's name. If the output reports the
+   crate as `Unchanged`, pass a fixed version explicitly with
+   `--precise <version>`. If the fix needs a new major version, update
+   `Cargo.toml` first.
 3. Run `cargo deny check` and `cargo test --all-features` again.
 4. If the vulnerability affects released versions of http-relay, publish a patch
    release. See [RELEASING.md](RELEASING.md).
