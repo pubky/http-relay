@@ -20,10 +20,12 @@ use axum::{
 #[cfg(test)]
 use super::response::MAX_ID_LENGTH;
 use super::response::{build_response, validate_id_length};
+use super::types::InsertOutcome;
 use super::waiting_list::{GetOrSubscribeResult, Message, SubscribeError};
 use super::AppState;
 
 /// POST /inbox/{id} - Store a message, return 200 immediately.
+/// Returns 503 if the store is full of undelivered messages.
 pub async fn post_handler(
     Path(id): Path<String>,
     State(state): State<AppState>,
@@ -40,15 +42,21 @@ pub async fn post_handler(
     let message = Message { body, content_type };
 
     let ttl = state.config.inbox_cache_ttl;
-    if let Err(e) = state.pending_list.lock().await.store(id, message, ttl) {
-        tracing::error!(?e, "Failed to persist message");
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Bytes::from("Failed to store message"),
-        ));
+    let store_result = state.pending_list.lock().await.store(id, message, ttl);
+    match store_result {
+        Ok(InsertOutcome::Stored) => Ok((StatusCode::OK, Bytes::new())),
+        Ok(InsertOutcome::StoreFull) => Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Bytes::from("Server at capacity"),
+        )),
+        Err(e) => {
+            tracing::error!(?e, "Failed to persist message");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Bytes::from("Failed to store message"),
+            ))
+        }
     }
-
-    Ok::<_, (StatusCode, Bytes)>((StatusCode::OK, Bytes::new()))
 }
 
 /// GET /inbox/{id} - Return message or wait (long-poll).
@@ -434,6 +442,46 @@ mod tests {
         // GET returns second value
         let response = server.get("/inbox/overwrite").await;
         assert_eq!(response.text(), "second");
+    }
+
+    #[tokio::test]
+    async fn test_post_returns_503_when_store_is_full() {
+        let config = Config {
+            max_entries: 1,
+            ..Config::default()
+        };
+        let (server, _state) = HttpRelay::create_test_server(config);
+        let body = Bytes::from_static(b"undelivered");
+        let response = server.post("/inbox/first").bytes(body).await;
+        assert_eq!(response.status_code(), 200);
+
+        let body = Bytes::from_static(b"rejected");
+        let response = server.post("/inbox/second").bytes(body).await;
+
+        assert_eq!(response.status_code(), 503);
+        assert_eq!(response.text(), "Server at capacity");
+        let response = server.get("/inbox/first").await;
+        assert_eq!(response.status_code(), 200);
+        assert_eq!(response.text(), "undelivered");
+    }
+
+    #[tokio::test]
+    async fn test_post_succeeds_when_full_store_has_acked_entry() {
+        let config = Config {
+            max_entries: 1,
+            ..Config::default()
+        };
+        let (server, _state) = HttpRelay::create_test_server(config);
+        let body = Bytes::from_static(b"delivered");
+        server.post("/inbox/first").bytes(body).await;
+        server.delete("/inbox/first").await;
+
+        let body = Bytes::from_static(b"accepted");
+        let response = server.post("/inbox/second").bytes(body).await;
+
+        assert_eq!(response.status_code(), 200);
+        let response = server.get("/inbox/second").await;
+        assert_eq!(response.text(), "accepted");
     }
 
     #[tokio::test]

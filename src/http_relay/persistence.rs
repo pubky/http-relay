@@ -1,17 +1,19 @@
 //! SQLite-based persistence for relay entries.
 //!
-//! Provides durable storage with automatic LRU eviction when the entry count
-//! exceeds the configured maximum. Supports both file-based and in-memory SQLite.
+//! Provides durable storage bounded by a maximum entry count. When the store is
+//! full, only entries that no longer hold a message (expired or acknowledged)
+//! are deleted to make room; otherwise new IDs are rejected. Supports both
+//! file-based and in-memory SQLite.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
 
-use super::types::StoredEntry;
+use super::types::{InsertOutcome, StoredEntry};
 use super::unix_timestamp_millis;
 
-/// Default maximum number of entries before LRU eviction kicks in.
+/// Default maximum number of entries the store holds.
 #[allow(dead_code)]
 pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
 
@@ -28,7 +30,7 @@ impl EntryRepository {
     ///
     /// # Arguments
     /// * `path` - File path for SQLite database, or None for in-memory database
-    /// * `max_entries` - Maximum entries before LRU eviction (oldest by created_at)
+    /// * `max_entries` - Maximum number of stored entries (see [`Self::insert`])
     ///
     /// # Errors
     /// Returns error if database connection or schema creation fails.
@@ -78,49 +80,36 @@ impl EntryRepository {
 
     /// Inserts or replaces an entry in the database.
     ///
-    /// If the entry count exceeds `max_entries`, the oldest entry (by created_at)
-    /// is deleted first to make room (LRU eviction).
+    /// Replacing an existing ID always succeeds. A new ID needs a free slot;
+    /// when the store holds `max_entries`, room is made by deleting, in order:
+    /// 1. expired entries,
+    /// 2. the oldest acknowledged entries (they no longer hold a message).
+    ///
+    /// Entries with an undelivered, unexpired message are never deleted. If no
+    /// room can be made, nothing is written and [`InsertOutcome::StoreFull`]
+    /// is returned.
     ///
     /// # Arguments
     /// * `id` - Unique identifier for the entry
     /// * `body` - Message body bytes
     /// * `content_type` - Optional content type header
     /// * `expires_at` - Unix timestamp when entry expires
+    ///
+    /// # Errors
+    /// Returns error if a database operation fails.
     pub fn insert(
         &self,
         id: &str,
         body: &[u8],
         content_type: Option<&str>,
         expires_at: i64,
-    ) -> Result<()> {
+    ) -> Result<InsertOutcome> {
         let connection = self.connection.lock().expect("Mutex poisoned");
         let created_at = unix_timestamp_millis();
 
-        // Check if we need to evict oldest entry (LRU eviction for disk overflow protection)
-        let count: usize = connection
-            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
-            .context("Failed to count entries")?;
-
-        if count >= self.max_entries {
-            // Find the oldest entry's ID before evicting
-            let oldest_id: Option<String> = connection
-                .query_row(
-                    "SELECT id FROM entries ORDER BY created_at ASC LIMIT 1",
-                    [],
-                    |row| row.get(0),
-                )
-                .ok();
-
-            // Only evict if the oldest entry is NOT the one we're about to update.
-            // If we're updating the oldest entry, INSERT OR REPLACE will handle it
-            // without needing eviction (no net change in entry count).
-            if let Some(ref oldest) = oldest_id {
-                if oldest != id {
-                    connection
-                        .execute("DELETE FROM entries WHERE id = ?1", [oldest])
-                        .context("Failed to delete oldest entry for LRU eviction")?;
-                }
-            }
+        let is_new_id = !Self::contains(&connection, id)?;
+        if is_new_id && !self.make_room(&connection)? {
+            return Ok(InsertOutcome::StoreFull);
         }
 
         // Always reset acked=0: a new message requires a new acknowledgment from the consumer.
@@ -132,7 +121,59 @@ impl EntryRepository {
             )
             .context("Failed to insert entry")?;
 
-        Ok(())
+        Ok(InsertOutcome::Stored)
+    }
+
+    fn contains(connection: &Connection, id: &str) -> Result<bool> {
+        connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1)",
+                [id],
+                |row| row.get(0),
+            )
+            .context("Failed to check for existing entry")
+    }
+
+    /// Frees one slot if the store is full, deleting only entries that no
+    /// longer hold a message. Returns whether a slot is available.
+    fn make_room(&self, connection: &Connection) -> Result<bool> {
+        let mut count = Self::count_entries(connection)?;
+        if count < self.max_entries {
+            return Ok(true);
+        }
+
+        count -= Self::delete_expired(connection)?;
+        if count < self.max_entries {
+            return Ok(true);
+        }
+
+        // More than one entry may be over the limit if `max_entries` was
+        // lowered since the database file was written.
+        let entries_over_limit = count + 1 - self.max_entries;
+        count -= connection
+            .execute(
+                "DELETE FROM entries WHERE id IN (
+                    SELECT id FROM entries WHERE acked = 1 ORDER BY created_at ASC LIMIT ?1
+                )",
+                [entries_over_limit],
+            )
+            .context("Failed to delete acknowledged entries")?;
+        Ok(count < self.max_entries)
+    }
+
+    fn count_entries(connection: &Connection) -> Result<usize> {
+        connection
+            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+            .context("Failed to count entries")
+    }
+
+    fn delete_expired(connection: &Connection) -> Result<usize> {
+        connection
+            .execute(
+                "DELETE FROM entries WHERE expires_at < ?1",
+                [unix_timestamp_millis()],
+            )
+            .context("Failed to delete expired entries")
     }
 
     /// Retrieves an entry by ID.
@@ -196,25 +237,14 @@ impl EntryRepository {
     /// Returns the number of entries deleted.
     pub fn cleanup_expired(&self) -> Result<usize> {
         let connection = self.connection.lock().expect("Mutex poisoned");
-        let current_time = unix_timestamp_millis();
-
-        let rows_deleted = connection
-            .execute("DELETE FROM entries WHERE expires_at < ?1", [current_time])
-            .context("Failed to cleanup expired entries")?;
-
-        Ok(rows_deleted)
+        Self::delete_expired(&connection)
     }
 
     /// Returns the total number of entries in the database.
     #[allow(dead_code)]
     pub fn count(&self) -> Result<usize> {
         let connection = self.connection.lock().expect("Mutex poisoned");
-
-        let count: usize = connection
-            .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
-            .context("Failed to count entries")?;
-
-        Ok(count)
+        Self::count_entries(&connection)
     }
 }
 
@@ -338,35 +368,6 @@ mod tests {
     }
 
     #[test]
-    fn test_lru_eviction() {
-        let repository = EntryRepository::new(None, 3).expect("Failed to create repository");
-        let expires_at = unix_timestamp_millis() + 3_600_000;
-
-        repository
-            .insert("id1", b"body1", None, expires_at)
-            .unwrap();
-        repository
-            .insert("id2", b"body2", None, expires_at)
-            .unwrap();
-        repository
-            .insert("id3", b"body3", None, expires_at)
-            .unwrap();
-
-        assert_eq!(repository.count().unwrap(), 3);
-
-        // Insert fourth entry, should evict id1 (oldest)
-        repository
-            .insert("id4", b"body4", None, expires_at)
-            .unwrap();
-
-        assert_eq!(repository.count().unwrap(), 3);
-        assert!(repository.get("id1").unwrap().is_none());
-        assert!(repository.get("id2").unwrap().is_some());
-        assert!(repository.get("id3").unwrap().is_some());
-        assert!(repository.get("id4").unwrap().is_some());
-    }
-
-    #[test]
     fn test_insert_or_replace() {
         let repository = create_test_repository();
         let expires_at = unix_timestamp_millis() + 3_600_000;
@@ -385,44 +386,89 @@ mod tests {
         assert_eq!(repository.count().unwrap(), 1);
     }
 
+    /// Inserts `ids` in order with one millisecond between them, so their
+    /// `created_at` order matches the slice order.
+    fn insert_in_order(repository: &EntryRepository, ids: &[&str], expires_at: i64) {
+        for id in ids {
+            repository.insert(id, b"body", None, expires_at).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[test]
-    fn test_lru_eviction_does_not_evict_updated_entry() {
-        // Regression test: updating the oldest entry at capacity should NOT evict it
+    fn test_insert_new_id_when_full_of_undelivered_messages_is_rejected() {
         let repository = EntryRepository::new(None, 3).expect("Failed to create repository");
         let expires_at = unix_timestamp_millis() + 3_600_000;
+        insert_in_order(&repository, &["id1", "id2", "id3"], expires_at);
 
-        // Fill repository to capacity: A is oldest, then B, then C
-        repository
-            .insert("A", b"original-A", None, expires_at)
+        let outcome = repository
+            .insert("id4", b"body4", None, expires_at)
             .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1)); // Ensure distinct timestamps
-        repository.insert("B", b"body-B", None, expires_at).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        repository.insert("C", b"body-C", None, expires_at).unwrap();
 
+        assert_eq!(outcome, InsertOutcome::StoreFull);
         assert_eq!(repository.count().unwrap(), 3);
+        assert!(repository.get("id4").unwrap().is_none());
+        for id in ["id1", "id2", "id3"] {
+            let entry = repository.get(id).unwrap().expect("entry should survive");
+            assert_eq!(entry.message_body, Some(b"body".to_vec()));
+        }
+    }
 
-        // Update entry A (the oldest) with new data - should NOT evict A
-        repository
+    #[test]
+    fn test_insert_when_full_deletes_expired_entry() {
+        let repository = EntryRepository::new(None, 3).expect("Failed to create repository");
+        let past = unix_timestamp_millis() - 3_600_000;
+        let future = unix_timestamp_millis() + 3_600_000;
+        insert_in_order(&repository, &["id1", "id2"], future);
+        insert_in_order(&repository, &["expired"], past);
+
+        let outcome = repository.insert("id4", b"body4", None, future).unwrap();
+
+        assert_eq!(outcome, InsertOutcome::Stored);
+        assert!(repository.get("expired").unwrap().is_none());
+        for id in ["id1", "id2", "id4"] {
+            assert!(repository.get(id).unwrap().is_some(), "{id} should exist");
+        }
+    }
+
+    #[test]
+    fn test_insert_when_full_deletes_oldest_acked_entry() {
+        let repository = EntryRepository::new(None, 3).expect("Failed to create repository");
+        let expires_at = unix_timestamp_millis() + 3_600_000;
+        insert_in_order(
+            &repository,
+            &["unacked", "older-acked", "newer-acked"],
+            expires_at,
+        );
+        repository.ack("older-acked").unwrap();
+        repository.ack("newer-acked").unwrap();
+
+        let outcome = repository
+            .insert("id4", b"body4", None, expires_at)
+            .unwrap();
+
+        assert_eq!(outcome, InsertOutcome::Stored);
+        assert!(repository.get("older-acked").unwrap().is_none());
+        for id in ["unacked", "newer-acked", "id4"] {
+            assert!(repository.get(id).unwrap().is_some(), "{id} should exist");
+        }
+    }
+
+    #[test]
+    fn test_insert_existing_id_when_full_replaces_without_deleting_others() {
+        let repository = EntryRepository::new(None, 3).expect("Failed to create repository");
+        let expires_at = unix_timestamp_millis() + 3_600_000;
+        insert_in_order(&repository, &["A", "B", "C"], expires_at);
+
+        let outcome = repository
             .insert("A", b"updated-A", None, expires_at)
             .unwrap();
 
-        // All three entries should still exist
+        assert_eq!(outcome, InsertOutcome::Stored);
         assert_eq!(repository.count().unwrap(), 3);
-
-        let entry_a = repository
-            .get("A")
-            .expect("Failed to get A")
-            .expect("A should exist");
+        let entry_a = repository.get("A").unwrap().expect("A should exist");
         assert_eq!(entry_a.message_body, Some(b"updated-A".to_vec()));
-
-        assert!(
-            repository.get("B").unwrap().is_some(),
-            "B should still exist"
-        );
-        assert!(
-            repository.get("C").unwrap().is_some(),
-            "C should still exist"
-        );
+        assert!(repository.get("B").unwrap().is_some(), "B should exist");
+        assert!(repository.get("C").unwrap().is_some(), "C should exist");
     }
 }

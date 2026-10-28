@@ -53,6 +53,8 @@ paths:
       responses:
         '200':
           description: Message stored successfully
+        '503':
+          $ref: '#/components/responses/ServerAtCapacity'
 
     get:
       summary: Retrieve a message (long-poll)
@@ -188,6 +190,8 @@ paths:
           $ref: '#/components/responses/MessageDelivered'
         '408':
           $ref: '#/components/responses/Timeout'
+        '503':
+          $ref: '#/components/responses/ServerAtCapacity'
 
 components:
   parameters:
@@ -280,6 +284,17 @@ components:
 
     Timeout:
       description: Timeout waiting for counterpart (producer or consumer)
+
+    ServerAtCapacity:
+      description: |
+        The store is full and every entry still holds an undelivered message.
+        The new message is not stored and existing messages are kept. Expired
+        and acknowledged entries free up room, so retry later.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Server at capacity
 
 tags:
   - name: inbox

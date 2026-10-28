@@ -69,7 +69,7 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--inbox-cache-ttl <SECS>` | Message TTL for inbox | `300` |
 | `--inbox-timeout <SECS>` | Inbox long-poll timeout | `25` |
 | `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
-| `--max-entries <N>` | Max entries in waiting list | `10000` |
+| `--max-entries <N>` | Max entries in waiting list. When full, expired and ACKed entries make room; otherwise `POST` returns `503` | `10000` |
 | `--persist-db <PATH>` | SQLite database path for persistence | (in-memory) |
 | `--cors-allow-all` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) | off |
 | `-v` | Verbosity (repeat for more) | warn |
@@ -129,7 +129,8 @@ curl -X POST http://localhost:8080/inbox/my-channel \
 
 **Responses:**
 - `200 OK` - Message stored successfully
-- `503 Service Unavailable` - Server at capacity
+- `503 Service Unavailable` - Server at capacity: every stored entry still holds
+  an undelivered message. Existing messages are kept; retry later.
 
 #### GET `/inbox/{id}` - Retrieve Message (Long-Poll)
 
