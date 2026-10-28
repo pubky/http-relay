@@ -13,6 +13,8 @@ mod waiting_list;
 
 // Server components (only with `server` feature)
 #[cfg(feature = "server")]
+mod client_addr;
+#[cfg(feature = "server")]
 pub(crate) mod inbox_handler;
 #[cfg(feature = "server")]
 mod response;

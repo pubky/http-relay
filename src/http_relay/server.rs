@@ -23,11 +23,13 @@ use anyhow::Result;
 
 use axum::{extract::DefaultBodyLimit, routing::get, Router};
 use axum_server::Handle;
+use ipnet::IpNet;
 use tokio::sync::Mutex;
 
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use url::Url;
 
+use super::client_addr::ClientAddrAcceptor;
 use super::inbox;
 #[cfg(feature = "link-compat")]
 use super::link;
@@ -92,6 +94,9 @@ pub(crate) struct Config {
     pub persist_db: Option<PathBuf>,
     /// When true, adds permissive CORS headers (`Access-Control-Allow-Origin: *`).
     pub cors_allow_all: bool,
+    /// Proxy networks allowed to send a PROXY protocol preface. If empty, the client
+    /// is the TCP peer and no preface is expected.
+    pub proxy_protocol_trusted: Vec<IpNet>,
 }
 
 impl Default for Config {
@@ -106,6 +111,7 @@ impl Default for Config {
             max_entries: DEFAULT_MAX_ENTRIES,
             persist_db: None,
             cors_allow_all: false,
+            proxy_protocol_trusted: Vec::new(),
         }
     }
 }
@@ -174,6 +180,17 @@ impl HttpRelayBuilder {
         self
     }
 
+    /// Require a PROXY protocol preface from these proxy networks and identify each
+    /// client by the address in it (default: none, the client is the TCP peer).
+    ///
+    /// Once set, the relay rejects connections from any other address and connections
+    /// without a valid preface. A trusted proxy can claim any client address, so list
+    /// only proxies you control and keep the relay's port unreachable for anyone else.
+    pub fn proxy_protocol_trusted(mut self, networks: impl IntoIterator<Item = IpNet>) -> Self {
+        self.0.proxy_protocol_trusted = networks.into_iter().collect();
+        self
+    }
+
     /// Start running an HTTP relay.
     pub async fn run(self) -> Result<HttpRelay> {
         HttpRelay::start(self.0).await
@@ -239,6 +256,13 @@ impl HttpRelay {
     }
 
     async fn start(config: Config) -> Result<Self> {
+        let acceptor = ClientAddrAcceptor::new(&config.proxy_protocol_trusted)?;
+        if !config.proxy_protocol_trusted.is_empty() {
+            tracing::info!(
+                trusted = ?config.proxy_protocol_trusted,
+                "PROXY protocol required"
+            );
+        }
         let app_state = AppState::new(config.clone())?;
         let app = Self::build_router(app_state.clone());
 
@@ -250,7 +274,7 @@ impl HttpRelay {
         http_listener.set_nonblocking(true)?;
         let http_address = http_listener.local_addr()?;
 
-        let server = axum_server::from_tcp(http_listener)?;
+        let server = axum_server::from_tcp(http_listener)?.acceptor(acceptor);
         tokio::spawn(async move {
             server
                 .handle(http_handle.clone())
