@@ -2,6 +2,16 @@
 //!
 //! Provides durable storage with automatic LRU eviction when the entry count
 //! exceeds the configured maximum. Supports both file-based and in-memory SQLite.
+//!
+//! # Deleted message bodies
+//!
+//! ACKs and cleanup only remove bodies from the live table. By default, SQLite
+//! marks the freed space as reusable and leaves the old bytes in place, so
+//! `PRAGMA secure_delete=ON` overwrites them with zeros. This is best-effort
+//! hygiene, not a guarantee: older page versions stay in the `-wal` file until
+//! SQLite overwrites it, and copies outside SQLite's control (filesystem
+//! blocks, SSD wear leveling, backups) remain possible. Clients that need
+//! confidentiality must encrypt message bodies before sending them.
 
 use anyhow::{Context, Result};
 use rusqlite::Connection;
@@ -39,6 +49,11 @@ impl EntryRepository {
                 Connection::open_in_memory().context("Failed to open in-memory SQLite database")?
             }
         };
+
+        // Per-connection setting; see "Deleted message bodies" in the module docs.
+        connection
+            .execute_batch("PRAGMA secure_delete=ON;")
+            .context("Failed to enable secure delete")?;
 
         // Enable WAL mode for better concurrency (only for file-based databases)
         if path.is_some() {
@@ -224,6 +239,19 @@ mod tests {
 
     fn create_test_repository() -> EntryRepository {
         EntryRepository::new(None, 100).expect("Failed to create test repository")
+    }
+
+    #[test]
+    fn test_secure_delete_is_enabled() {
+        // Regression test for https://github.com/pubky/http-relay/issues/18
+        let repository = create_test_repository();
+        let connection = repository.connection.lock().unwrap();
+
+        let secure_delete: i64 = connection
+            .query_row("PRAGMA secure_delete", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(secure_delete, 1);
     }
 
     #[test]

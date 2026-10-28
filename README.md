@@ -112,7 +112,8 @@ The primary API. Store-and-forward with explicit acknowledgment.
 **Inbox IDs act as shared secrets.** Anyone who knows an ID can read/write/ACK
 that inbox. IDs should be cryptographically random (e.g., 128-bit UUIDs).
 Predictable IDs allow attackers to intercept or acknowledge messages.
-Messages persist in plaintext memory for the TTL duration. Do not relay
+Messages persist in plaintext until they're ACKed or expire. With
+`--persist-db`, deleted bodies can remain on disk after that. Do not relay
 sensitive one-time credentials unless encryption is applied at the
 application layer.
 
