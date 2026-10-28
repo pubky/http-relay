@@ -53,7 +53,7 @@ http-relay = "0.6"
 # Default: bind to 127.0.0.1:8080 (localhost only)
 http-relay
 
-# Bind to all interfaces (for production/Docker)
+# Bind to all interfaces (for Docker, behind a reverse proxy)
 http-relay --bind 0.0.0.0
 
 # Custom configuration
@@ -68,6 +68,7 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--port <PORT>` | HTTP port (0 = random) | `8080` |
 | `--inbox-cache-ttl <SECS>` | Message TTL for inbox | `300` |
 | `--inbox-timeout <SECS>` | Inbox long-poll timeout | `25` |
+| `--link-timeout <SECS>` | Link endpoint timeout | `600` |
 | `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
 | `--max-entries <N>` | Max entries in waiting list | `10000` |
 | `--persist-db <PATH>` | SQLite database path for persistence | (in-memory) |
@@ -93,6 +94,26 @@ async fn main() -> anyhow::Result<()> {
     relay.shutdown().await
 }
 ```
+
+## Deploy in production
+
+Run the relay behind a reverse proxy, such as nginx or Caddy. The relay has no
+authentication and doesn't limit clients itself, so it relies on the proxy for
+the following:
+
+- **TLS:** Inbox IDs are shared secrets and appear in every request path. Without
+  TLS, anyone on the network path can read them and take over those inboxes.
+- **Rate limiting per client IP:** Any client can store messages and open
+  long-poll requests. Without a limit, one client can use up the relay's entry
+  and waiter capacity for everyone else.
+- **Connection limits per client IP:** Each long-poll request holds a connection
+  open for up to `--inbox-timeout`, or `--link-timeout` for `/link`.
+- **Upstream read timeout:** Set it longer than the longest timeout you use, so
+  the proxy doesn't cut off long-poll requests early. Use more than 25 seconds
+  for the inbox endpoints, and more than 10 minutes if you serve `/link`.
+
+Keep the relay's own port unreachable from the internet, for example by binding
+it to `127.0.0.1` or to a private container network.
 
 ## API
 
