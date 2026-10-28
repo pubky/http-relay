@@ -17,6 +17,7 @@ use anyhow::Result;
 
 use axum::{extract::DefaultBodyLimit, routing::get, Router};
 use axum_server::Handle;
+use hyper_util::rt::TokioTimer;
 use tokio::sync::Mutex;
 
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
@@ -42,6 +43,16 @@ const DEFAULT_MAX_BODY_SIZE: usize = 2 * 1024;
 
 /// Default maximum entries in the unified LRU cache.
 const DEFAULT_MAX_ENTRIES: usize = 10_000;
+
+/// Default time a client has to send the complete request headers before the server
+/// closes the connection.
+///
+/// Without this limit, a client can hold a connection open forever by sending its headers
+/// slowly or not at all (slowloris) and exhaust the relay's file descriptors. A legitimate
+/// client sends its headers within milliseconds, so 10 seconds leaves room for slow mobile
+/// networks while still freeing stalled connections quickly. The same limit closes idle
+/// keep-alive connections that don't start a new request in time.
+const DEFAULT_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -86,6 +97,8 @@ pub(crate) struct Config {
     pub persist_db: Option<PathBuf>,
     /// When true, adds permissive CORS headers (`Access-Control-Allow-Origin: *`).
     pub cors_allow_all: bool,
+    /// How long a client may take to send the complete request headers.
+    pub header_read_timeout: Duration,
 }
 
 impl Default for Config {
@@ -100,6 +113,7 @@ impl Default for Config {
             max_entries: DEFAULT_MAX_ENTRIES,
             persist_db: None,
             cors_allow_all: false,
+            header_read_timeout: DEFAULT_HEADER_READ_TIMEOUT,
         }
     }
 }
@@ -165,6 +179,14 @@ impl HttpRelayBuilder {
     /// Enable permissive CORS headers (`Access-Control-Allow-Origin: *`).
     pub fn cors_allow_all(mut self, cors_allow_all: bool) -> Self {
         self.0.cors_allow_all = cors_allow_all;
+        self
+    }
+
+    /// Configure how long a client may take to send the complete request headers
+    /// (default: 10 seconds). The server closes connections that exceed it, which protects
+    /// against clients that hold connections open by sending headers slowly or not at all.
+    pub fn header_read_timeout(mut self, timeout: Duration) -> Self {
+        self.0.header_read_timeout = timeout;
         self
     }
 
@@ -244,7 +266,15 @@ impl HttpRelay {
         http_listener.set_nonblocking(true)?;
         let http_address = http_listener.local_addr()?;
 
-        let server = axum_server::from_tcp(http_listener)?;
+        // HTTP/1 only: in auto mode, hyper-util waits without a timeout to detect the
+        // HTTP/2 preface, so a client that sends nothing would bypass the header timeout.
+        // hyper ignores `header_read_timeout` unless a timer is set.
+        let mut server = axum_server::from_tcp(http_listener)?.http1_only();
+        server
+            .http_builder()
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(config.header_read_timeout);
         tokio::spawn(async move {
             server
                 .handle(http_handle.clone())
@@ -385,5 +415,52 @@ mod tests {
         assert!(response.contains("Http Relay"));
 
         relay.shutdown().await.unwrap();
+    }
+
+    /// Starts a relay with a 200 ms header read timeout, sends `request_prefix`, and
+    /// returns how long the server took to close the connection.
+    async fn time_until_server_closes_connection(request_prefix: &[u8]) -> Duration {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let config = Config {
+            header_read_timeout: Duration::from_millis(200),
+            ..Config::default()
+        };
+        let relay = HttpRelay::start(config).await.unwrap();
+        let mut stream = TcpStream::connect(relay.http_address()).await.unwrap();
+        stream.write_all(request_prefix).await.unwrap();
+
+        let started = tokio::time::Instant::now();
+        // The server may answer with an error response before closing; only the close matters.
+        let mut ignored_response = Vec::new();
+        let _read_result = tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.read_to_end(&mut ignored_response),
+        )
+        .await
+        .expect("server should close the connection after the header read timeout");
+        started.elapsed()
+    }
+
+    /// Regression test for slowloris: headers without the terminating blank line.
+    #[tokio::test]
+    async fn test_closes_connection_with_incomplete_headers() {
+        let elapsed =
+            time_until_server_closes_connection(b"GET / HTTP/1.1\r\nHost: localhost\r\n").await;
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "closed too early: {elapsed:?}"
+        );
+    }
+
+    /// Regression test for slowloris: a client that connects and sends nothing.
+    #[tokio::test]
+    async fn test_closes_connection_without_request() {
+        let elapsed = time_until_server_closes_connection(b"").await;
+        assert!(
+            elapsed >= Duration::from_millis(150),
+            "closed too early: {elapsed:?}"
+        );
     }
 }

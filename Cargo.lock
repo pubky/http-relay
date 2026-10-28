@@ -619,6 +619,7 @@ dependencies = [
  "futures-util",
  "http-body",
  "http-body-util",
+ "hyper-util",
  "rusqlite",
  "tokio",
  "tower-http",

@@ -75,6 +75,11 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `-v` | Verbosity (repeat for more) | warn |
 | `-q, --quiet` | Silence output | - |
 
+The relay speaks HTTP/1.1 only. It closes connections that don't send complete request
+headers within 10 seconds, but it doesn't limit how many connections one client opens.
+In production, run it behind a reverse proxy, such as nginx or Caddy, that limits
+connections per client.
+
 ### As Library
 
 ```rust

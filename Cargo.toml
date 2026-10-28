@@ -22,6 +22,7 @@ tracing = "0.1.44"
 axum = { version = "0.8.8", optional = true }
 http-body = { version = "1.0", optional = true }
 axum-server = { version = "0.8.0", optional = true }
+hyper-util = { version = "0.1.20", features = ["tokio"], optional = true }
 tower-http = { version = "0.6.8", features = ["cors", "trace"], optional = true }
 url = { version = "2.5.8", optional = true }
 
@@ -36,7 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 default = ["cli", "persist", "link-compat"]
 
 # HTTP server (axum + handlers + middleware)
-server = ["dep:axum", "dep:http-body", "dep:axum-server", "dep:tower-http", "dep:url"]
+server = ["dep:axum", "dep:http-body", "dep:axum-server", "dep:hyper-util", "dep:tower-http", "dep:url"]
 
 # SQLite persistence (without this: in-memory HashMap storage)
 persist = ["dep:rusqlite"]
