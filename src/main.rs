@@ -41,7 +41,8 @@ struct Args {
     #[arg(long, default_value_t = 2 * 1024)]
     max_body_size: usize,
 
-    /// Maximum entries in the waiting list (oldest entries evicted when full)
+    /// Maximum entries in the waiting list (oldest entries evicted when full).
+    /// Also limits the number of IDs with waiting requests (503 when full)
     #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES)]
     max_entries: usize,
 

@@ -162,6 +162,8 @@ impl HttpRelayBuilder {
 
     /// Configure the maximum entries in the waiting list (default: 10000).
     /// When this limit is reached, oldest entries are evicted.
+    /// It also limits the number of IDs with waiting requests; requests for new
+    /// IDs beyond it get `503 Service Unavailable`.
     pub fn max_entries(mut self, max: usize) -> Self {
         self.0.max_entries = max;
         self

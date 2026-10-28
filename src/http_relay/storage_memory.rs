@@ -115,22 +115,29 @@ impl EntryRepository {
     }
 
     /// Deletes all expired entries.
-    pub fn cleanup_expired(&self) -> Result<usize> {
+    ///
+    /// Returns the IDs of the deleted entries, so callers can release
+    /// resources tied to them without looking up each ID.
+    pub fn cleanup_expired(&self) -> Result<Vec<String>> {
         let mut entries = self.entries.lock().expect("Mutex poisoned");
         let current_time = unix_timestamp_millis();
 
-        let expired: Vec<String> = entries
+        let expired_ids: Vec<String> = entries
             .iter()
             .filter(|(_, e)| e.expires_at < current_time)
             .map(|(k, _)| k.clone())
             .collect();
 
-        let count = expired.len();
-        for id in expired {
-            entries.remove(&id);
+        for id in &expired_ids {
+            entries.remove(id);
         }
 
-        Ok(count)
+        Ok(expired_ids)
+    }
+
+    /// Returns the maximum number of entries before LRU eviction.
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
     }
 
     /// Returns the total number of entries.
@@ -228,8 +235,8 @@ mod tests {
             .insert("valid", b"new", None, future)
             .expect("Failed to insert");
 
-        let deleted_count = repository.cleanup_expired().expect("Failed to cleanup");
-        assert_eq!(deleted_count, 1);
+        let deleted_ids = repository.cleanup_expired().expect("Failed to cleanup");
+        assert_eq!(deleted_ids, vec!["expired".to_string()]);
 
         assert!(repository.get("expired").expect("Failed to get").is_none());
         assert!(repository.get("valid").expect("Failed to get").is_some());

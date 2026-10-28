@@ -70,7 +70,7 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--inbox-timeout <SECS>` | Inbox long-poll timeout | `25` |
 | `--link-timeout <SECS>` | Link endpoint timeout | `600` |
 | `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
-| `--max-entries <N>` | Max entries in waiting list | `10000` |
+| `--max-entries <N>` | Max entries in waiting list, and max IDs with waiting requests | `10000` |
 | `--persist-db <PATH>` | SQLite database path for persistence | (in-memory) |
 | `--cors-allow-all` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) | off |
 | `--proxy-protocol-trusted <CIDR>` | Require a PROXY protocol preface from this proxy and identify clients by it. Repeatable. See [DEPLOY.md](DEPLOY.md) | off (TCP peer) |
