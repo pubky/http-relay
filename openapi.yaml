@@ -244,6 +244,19 @@ components:
           description: Content-Type from the producer's request (if provided)
           schema:
             type: string
+        Content-Security-Policy:
+          description: |
+            Always `sandbox`. The producer chooses the body and Content-Type,
+            so browsers must not run relayed content as a page on the relay's
+            origin. Doesn't affect `fetch()` or non-browser clients.
+          schema:
+            type: string
+            enum: [sandbox]
+        X-Content-Type-Options:
+          description: Always `nosniff`, so browsers don't guess a different type.
+          schema:
+            type: string
+            enum: [nosniff]
       content:
         application/octet-stream:
           schema:
@@ -263,6 +276,19 @@ components:
           description: Content-Type from the producer's request (if provided)
           schema:
             type: string
+        Content-Security-Policy:
+          description: |
+            Always `sandbox`. The producer chooses the body and Content-Type,
+            so browsers must not run relayed content as a page on the relay's
+            origin. Doesn't affect `fetch()` or non-browser clients.
+          schema:
+            type: string
+            enum: [sandbox]
+        X-Content-Type-Options:
+          description: Always `nosniff`, so browsers don't guess a different type.
+          schema:
+            type: string
+            enum: [nosniff]
       content:
         application/octet-stream:
           schema:

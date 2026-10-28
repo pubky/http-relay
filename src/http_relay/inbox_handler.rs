@@ -19,7 +19,7 @@ use axum::{
 
 #[cfg(test)]
 use super::response::MAX_ID_LENGTH;
-use super::response::{build_response, validate_id_length};
+use super::response::{message_response, validate_id_length};
 use super::waiting_list::{GetOrSubscribeResult, Message, SubscribeError};
 use super::AppState;
 
@@ -58,8 +58,8 @@ pub async fn get_handler(
     Path(id): Path<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    if let Err((status, body)) = validate_id_length(&id, "Inbox ID") {
-        return build_response(status, body, None);
+    if let Err(rejection) = validate_id_length(&id, "Inbox ID") {
+        return rejection.into_response();
     }
 
     // Atomically check for message or subscribe (fixes TOCTOU race)
@@ -69,25 +69,23 @@ pub async fn get_handler(
     };
 
     match result {
-        Ok(GetOrSubscribeResult::Message(msg)) => {
-            build_response(StatusCode::OK, msg.body, msg.content_type)
-        }
+        Ok(GetOrSubscribeResult::Message(msg)) => message_response(msg),
         Ok(GetOrSubscribeResult::Waiting(receiver)) => {
             match tokio::time::timeout(state.config.inbox_timeout, receiver).await {
-                Ok(Ok(msg)) => build_response(StatusCode::OK, msg.body, msg.content_type),
-                Ok(Err(_)) => build_response(StatusCode::NOT_FOUND, "Entry expired".into(), None),
-                Err(_) => build_response(
+                Ok(Ok(msg)) => message_response(msg),
+                Ok(Err(_)) => (StatusCode::NOT_FOUND, Bytes::from("Entry expired")).into_response(),
+                Err(_) => (
                     StatusCode::REQUEST_TIMEOUT,
-                    "Request timed out".into(),
-                    None,
-                ),
+                    Bytes::from("Request timed out"),
+                )
+                    .into_response(),
             }
         }
-        Err(SubscribeError::WaiterLimitReached) => build_response(
+        Err(SubscribeError::WaiterLimitReached) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            "Too many concurrent requests".into(),
-            None,
-        ),
+            Bytes::from("Too many concurrent requests"),
+        )
+            .into_response(),
         // get_or_subscribe creates a waiter when no entry exists, so NotFound is unreachable
         Err(SubscribeError::NotFound) => unreachable!(),
     }
@@ -416,6 +414,33 @@ mod tests {
         assert_eq!(
             response.header("content-type").to_str().unwrap(),
             "application/json"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_html_message_is_served_inert() {
+        let (server, _state) = HttpRelay::create_test_server(Config::default());
+
+        let body = Bytes::from_static(b"<script>alert(1)</script>");
+        server
+            .post("/inbox/html-test")
+            .content_type("text/html")
+            .bytes(body)
+            .await;
+
+        let response = server.get("/inbox/html-test").await;
+        assert_eq!(response.status_code(), 200);
+        assert_eq!(
+            response.header("content-type").to_str().unwrap(),
+            "text/html"
+        );
+        assert_eq!(
+            response.header("content-security-policy").to_str().unwrap(),
+            "sandbox"
+        );
+        assert_eq!(
+            response.header("x-content-type-options").to_str().unwrap(),
+            "nosniff"
         );
     }
 
