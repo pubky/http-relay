@@ -54,7 +54,7 @@ const DEFAULT_INBOX_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 /// Default maximum request body size (2KB).
 const DEFAULT_MAX_BODY_SIZE: usize = 2 * 1024;
 
-/// Default maximum entries in the unified LRU cache.
+/// Default maximum entries in the store.
 const DEFAULT_MAX_ENTRIES: usize = 10_000;
 
 #[derive(Clone)]
@@ -167,7 +167,8 @@ impl HttpRelayBuilder {
     }
 
     /// Configure the maximum entries in the waiting list (default: 10000).
-    /// When this limit is reached, oldest entries are evicted.
+    /// When the store is full, expired and acknowledged entries make room for new
+    /// IDs; if every entry still holds an undelivered message, POST returns 503.
     /// It also limits the number of IDs with waiting requests; requests for new
     /// IDs beyond it get `503 Service Unavailable`.
     pub fn max_entries(mut self, max: usize) -> Self {
@@ -321,7 +322,7 @@ impl HttpRelay {
 
         // Spawn background task to clean up expired entries.
         // 15 seconds balances memory reclamation (don't let stale entries pile up)
-        // against CPU overhead (cleanup scans the entire LRU cache).
+        // against CPU overhead (cleanup scans the entire store).
         let cleanup_interval = Duration::from_secs(15);
         let pending_list = app_state.pending_list.clone();
         tokio::spawn(async move {

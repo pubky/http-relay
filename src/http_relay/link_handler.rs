@@ -111,13 +111,17 @@ pub async fn post_handler(
             )
                 .into_response();
         }
-        Err(StoreAndSubscribeError::NotFound) => {
-            // Entry was immediately evicted (shouldn't happen normally)
+        Err(StoreAndSubscribeError::StoreFull) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Bytes::from("Server at capacity"),
             )
                 .into_response();
+        }
+        Err(StoreAndSubscribeError::NotFound) => {
+            // Only reachable when the entry expired right after being stored
+            // (a near-zero link timeout); stored entries are never evicted.
+            return (StatusCode::NOT_FOUND, Bytes::from("Entry expired")).into_response();
         }
         Err(StoreAndSubscribeError::Storage(e)) => {
             tracing::error!(?e, "Failed to persist message");
@@ -133,7 +137,7 @@ pub async fn post_handler(
     let result = match tokio::time::timeout(state.config.link_timeout, receiver).await {
         Ok(Ok(())) => (StatusCode::OK, Bytes::new()),
         Ok(Err(_)) => {
-            // Entry expired or was evicted
+            // Entry expired, or was overwritten by another producer
             (StatusCode::NOT_FOUND, Bytes::from("Entry expired"))
         }
         Err(_) => (
@@ -359,6 +363,27 @@ mod tests {
             state.pending_list.lock().await.is_acked("new-channel"),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn test_post_returns_503_when_store_is_full() {
+        let config = Config {
+            max_entries: 1,
+            link_timeout: Duration::from_millis(100),
+            ..Config::default()
+        };
+        let (server, _state) = HttpRelay::create_test_server(config);
+        let body = Bytes::from_static(b"undelivered");
+        let response = server.post("/inbox/occupied").bytes(body).await;
+        assert_eq!(response.status_code(), 200);
+
+        let body = Bytes::from_static(b"rejected");
+        let response = server.post("/link/new-channel").bytes(body).await;
+
+        assert_eq!(response.status_code(), 503);
+        assert_eq!(response.text(), "Server at capacity");
+        let response = server.get("/inbox/occupied").await;
+        assert_eq!(response.text(), "undelivered");
     }
 
     #[tokio::test]

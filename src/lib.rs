@@ -25,6 +25,6 @@ pub use http_relay::{HttpRelay, HttpRelayBuilder};
 
 // Core types (always available)
 pub use http_relay::{
-    EntryRepository, GetOrSubscribeResult, Message, StoreAndSubscribeError, StoredEntry,
-    SubscribeError, WaitingList,
+    EntryRepository, GetOrSubscribeResult, InsertOutcome, Message, StoreAndSubscribeError,
+    StoredEntry, SubscribeError, WaitingList,
 };
