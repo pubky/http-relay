@@ -21,7 +21,7 @@ use axum::{
 #[cfg(test)]
 use super::response::MAX_ID_LENGTH;
 use super::response::{build_response, validate_id_length};
-use super::waiting_list::{GetOrSubscribeResult, Message, SubscribeError};
+use super::waiting_list::{GetOrSubscribeResult, Message, StoreAndSubscribeError, SubscribeError};
 use super::AppState;
 
 /// GET /link/{id} - Consumer waits for producer, auto-ACKs on receive.
@@ -97,48 +97,35 @@ pub async fn post_handler(
         content_type,
     };
 
-    // Store message and subscribe for ACK notification
-    let receiver = {
-        let mut pending_list = state.pending_list.lock().await;
-
-        // Check before storing: a producer that gets 503 must be able to retry
-        // without its first message having been delivered already. Storing drops
-        // the ID's old ACK waiters, so the per-ID limit can't fail the subscribe.
-        if pending_list.ensure_waiter_capacity(&id).is_err() {
+    let stored = state.pending_list.lock().await.store_and_subscribe_ack(
+        id,
+        message,
+        state.config.link_timeout,
+    );
+    let receiver = match stored {
+        Ok(rx) => rx,
+        Err(StoreAndSubscribeError::WaiterLimitReached) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Bytes::from("Too many concurrent requests"),
             )
                 .into_response();
         }
-
-        if let Err(e) = pending_list.store(id.clone(), message, state.config.link_timeout) {
+        Err(StoreAndSubscribeError::NotFound) => {
+            // Entry was immediately evicted (shouldn't happen normally)
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Bytes::from("Server at capacity"),
+            )
+                .into_response();
+        }
+        Err(StoreAndSubscribeError::Storage(e)) => {
             tracing::error!(?e, "Failed to persist message");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Bytes::from("Failed to store message"),
             )
                 .into_response();
-        }
-
-        // Subscribe to get notified when consumer ACKs
-        match pending_list.subscribe_ack(&id) {
-            Ok(rx) => rx,
-            Err(SubscribeError::NotFound) => {
-                // Entry was immediately evicted (shouldn't happen normally)
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Bytes::from("Server at capacity"),
-                )
-                    .into_response();
-            }
-            Err(SubscribeError::WaiterLimitReached) => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Bytes::from("Too many concurrent requests"),
-                )
-                    .into_response();
-            }
         }
     };
 

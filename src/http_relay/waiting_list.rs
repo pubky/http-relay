@@ -140,6 +140,27 @@ pub enum SubscribeError {
     NotFound,
 }
 
+/// Error returned by [`WaitingList::store_and_subscribe_ack`].
+#[derive(Debug)]
+pub enum StoreAndSubscribeError {
+    /// Maximum waiters for this ID, or maximum number of waiting IDs, reached.
+    /// Nothing was stored.
+    WaiterLimitReached,
+    /// Entry expired right after being stored.
+    NotFound,
+    /// Persisting the message failed.
+    Storage(anyhow::Error),
+}
+
+impl From<SubscribeError> for StoreAndSubscribeError {
+    fn from(error: SubscribeError) -> Self {
+        match error {
+            SubscribeError::WaiterLimitReached => Self::WaiterLimitReached,
+            SubscribeError::NotFound => Self::NotFound,
+        }
+    }
+}
+
 /// Result of get_or_subscribe operation.
 pub enum GetOrSubscribeResult {
     /// Message was immediately available.
@@ -258,6 +279,24 @@ impl WaitingList {
         }
     }
 
+    /// Stores a message and subscribes its producer for the ACK (link pattern).
+    ///
+    /// Checks for waiter room before storing: a producer rejected with
+    /// `WaiterLimitReached` must be able to retry without its first message
+    /// having been delivered already.
+    pub fn store_and_subscribe_ack(
+        &mut self,
+        id: String,
+        message: Message,
+        ttl: Duration,
+    ) -> Result<oneshot::Receiver<()>, StoreAndSubscribeError> {
+        self.ensure_waiter_capacity(&id)?;
+        self.store(id.clone(), message, ttl)
+            .map_err(StoreAndSubscribeError::Storage)?;
+        // Storing drops the ID's old ACK waiters, so the per-ID limit can't fail here.
+        Ok(self.subscribe_ack(&id)?)
+    }
+
     /// Atomically checks for message and subscribes if not present.
     ///
     /// Prevents TOCTOU race: without this, a separate "check then subscribe" would
@@ -291,10 +330,10 @@ impl WaitingList {
     /// Checks that a waiter can be added for `id`.
     ///
     /// Returns `Err(SubscribeError::WaiterLimitReached)` if `id` is new and
-    /// `max_waiting_ids` IDs already have live waiters. Call it before a side
-    /// effect that must not happen when the following subscribe fails, such as
-    /// storing a message whose producer then waits for the ACK.
-    pub fn ensure_waiter_capacity(&mut self, id: &str) -> Result<(), SubscribeError> {
+    /// `max_waiting_ids` IDs already have live waiters. Doesn't add `id`, so
+    /// callers can check before a side effect that must not happen when the
+    /// following subscribe fails (see [`Self::store_and_subscribe_ack`]).
+    fn ensure_waiter_capacity(&mut self, id: &str) -> Result<(), SubscribeError> {
         if self.waiters.contains_key(id) || self.waiters.len() < self.max_waiting_ids {
             return Ok(());
         }
@@ -613,6 +652,62 @@ mod tests {
         assert!(list.ensure_waiter_capacity("a").is_ok());
 
         assert!(list.waiters.is_empty());
+    }
+
+    // ========== store_and_subscribe_ack tests ==========
+
+    #[test]
+    fn store_and_subscribe_ack_at_waiting_id_limit_does_not_store() {
+        // Regression test: a producer rejected for lack of waiter room must not
+        // leave its message behind for a consumer to fetch.
+        let mut list = WaitingList::new_in_memory(1);
+        let _waiting = list.get_or_subscribe("occupied").expect("should succeed");
+
+        let result = list.store_and_subscribe_ack(
+            "new".to_string(),
+            make_message("rejected"),
+            Duration::from_secs(60),
+        );
+
+        assert!(
+            matches!(result, Err(StoreAndSubscribeError::WaiterLimitReached)),
+            "expected WaiterLimitReached error"
+        );
+        assert_eq!(list.is_acked("new"), None, "message must not be stored");
+    }
+
+    #[tokio::test]
+    async fn store_and_subscribe_ack_for_waiting_id_at_limit_succeeds() {
+        let mut list = WaitingList::new_in_memory(1);
+        let consumer = match list.get_or_subscribe("id1").expect("should succeed") {
+            GetOrSubscribeResult::Waiting(rx) => rx,
+            GetOrSubscribeResult::Message(_) => panic!("expected waiting"),
+        };
+
+        let result = list.store_and_subscribe_ack(
+            "id1".to_string(),
+            make_message("hello"),
+            Duration::from_secs(60),
+        );
+
+        assert!(result.is_ok(), "existing ID should accept the producer");
+        let received = consumer.await.expect("consumer should receive message");
+        assert_eq!(received.body, Bytes::from("hello"));
+    }
+
+    #[test]
+    fn store_and_subscribe_ack_replaces_ack_waiters_at_per_id_limit() {
+        let mut list = create_test_list();
+        let ttl = Duration::from_secs(60);
+        list.store("id1".to_string(), make_message("first"), ttl)
+            .unwrap();
+        let _receivers: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
+            .map(|_| list.subscribe_ack("id1").expect("should subscribe"))
+            .collect();
+
+        let result = list.store_and_subscribe_ack("id1".to_string(), make_message("second"), ttl);
+
+        assert!(result.is_ok(), "storing drops the old ACK waiters");
     }
 
     // ========== State transition tests ==========
