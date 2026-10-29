@@ -451,15 +451,17 @@ mod tests {
         relay.shutdown().await.unwrap();
     }
 
-    /// Starts a relay with a 200 ms header read timeout, sends `request_prefix`, and
-    /// returns how long the server took to close the connection.
-    async fn time_until_server_closes_connection(request_prefix: &[u8]) -> Duration {
+    const TEST_HEADER_READ_TIMEOUT: Duration = Duration::from_millis(200);
+
+    /// Starts a relay from `config` with a 200 ms header read timeout, sends `request_prefix`,
+    /// and asserts that the server closes the connection when the timeout fires.
+    async fn assert_closes_after_header_timeout(config: Config, request_prefix: &[u8]) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpStream;
 
         let config = Config {
-            header_read_timeout: Duration::from_millis(200),
-            ..Config::default()
+            header_read_timeout: TEST_HEADER_READ_TIMEOUT,
+            ..config
         };
         let relay = HttpRelay::start(config).await.unwrap();
         let mut stream = TcpStream::connect(relay.http_address()).await.unwrap();
@@ -474,27 +476,46 @@ mod tests {
         )
         .await
         .expect("server should close the connection after the header read timeout");
-        started.elapsed()
+
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= TEST_HEADER_READ_TIMEOUT - Duration::from_millis(50),
+            "closed too early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "closed too late: {elapsed:?}"
+        );
     }
 
     /// Regression test for slowloris: headers without the terminating blank line.
     #[tokio::test]
     async fn test_closes_connection_with_incomplete_headers() {
-        let elapsed =
-            time_until_server_closes_connection(b"GET / HTTP/1.1\r\nHost: localhost\r\n").await;
-        assert!(
-            elapsed >= Duration::from_millis(150),
-            "closed too early: {elapsed:?}"
-        );
+        assert_closes_after_header_timeout(
+            Config::default(),
+            b"GET / HTTP/1.1\r\nHost: localhost\r\n",
+        )
+        .await;
     }
 
     /// Regression test for slowloris: a client that connects and sends nothing.
     #[tokio::test]
     async fn test_closes_connection_without_request() {
-        let elapsed = time_until_server_closes_connection(b"").await;
-        assert!(
-            elapsed >= Duration::from_millis(150),
-            "closed too early: {elapsed:?}"
-        );
+        assert_closes_after_header_timeout(Config::default(), b"").await;
+    }
+
+    /// Regression test for slowloris behind a trusted proxy: the PROXY preface arrives in
+    /// time, then the headers stall. The header timeout must still apply after the preface.
+    #[tokio::test]
+    async fn test_closes_connection_with_incomplete_headers_after_proxy_preface() {
+        let config = Config {
+            proxy_protocol_trusted: vec!["127.0.0.1/32".parse().unwrap()],
+            ..Config::default()
+        };
+        assert_closes_after_header_timeout(
+            config,
+            b"PROXY TCP4 203.0.113.7 127.0.0.1 51234 80\r\nGET / HTTP/1.1\r\nHost: localhost\r\n",
+        )
+        .await;
     }
 }

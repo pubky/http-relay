@@ -20,6 +20,11 @@ doesn't terminate TLS, so it relies on the proxy for the following:
 Keep the relay's own port unreachable from the internet, for example by binding
 it to `127.0.0.1` or to a private container network.
 
+The relay speaks HTTP/1.1 only. It closes connections that don't send complete
+request headers within 10 seconds, so slow clients can't hold connections open
+forever. In the Nginx setup below, this is the only protection against slow
+headers: a `stream` server forwards TCP without parsing HTTP.
+
 ## How the relay identifies clients
 
 To apply limits per client, the relay needs each client's real IP address.
@@ -146,6 +151,8 @@ Notes:
 - Nginx's `limit_req` is part of the `http` module, so it can't rate-limit
   requests to the relay in this setup. Use `limit_conn` in the `stream` server
   instead.
+- Don't add `ssl_alpn h2` to the relay's `stream` server. Clients would then
+  send HTTP/2, which the relay rejects.
 - The `stream` server only serves the relay's hostname. Port 80 and ACME
   challenges stay in your `http` blocks. After renewing the relay's
   certificate, reload Nginx so the `stream` server uses it.
