@@ -20,15 +20,15 @@ use axum::{
 
 #[cfg(test)]
 use super::response::MAX_ID_LENGTH;
-use super::response::{build_response, validate_id_length};
+use super::response::{message_response, validate_id_length};
 use super::waiting_list::{GetOrSubscribeResult, Message, StoreAndSubscribeError, SubscribeError};
 use super::AppState;
 
 /// GET /link/{id} - Consumer waits for producer, auto-ACKs on receive.
 /// This maintains backwards compatibility with the synchronous handoff model.
 pub async fn get_handler(Path(id): Path<String>, State(state): State<AppState>) -> Response {
-    if let Err((status, body)) = validate_id_length(&id, "Channel ID") {
-        return build_response(status, body, None);
+    if let Err(rejection) = validate_id_length(&id, "Channel ID") {
+        return rejection.into_response();
     }
 
     // Get message or wait for it
@@ -43,23 +43,23 @@ pub async fn get_handler(Path(id): Path<String>, State(state): State<AppState>) 
             match tokio::time::timeout(state.config.link_timeout, receiver).await {
                 Ok(Ok(msg)) => msg,
                 Ok(Err(_)) => {
-                    return build_response(StatusCode::NOT_FOUND, "Entry expired".into(), None);
+                    return (StatusCode::NOT_FOUND, Bytes::from("Entry expired")).into_response();
                 }
                 Err(_) => {
-                    return build_response(
+                    return (
                         StatusCode::REQUEST_TIMEOUT,
-                        "Request timed out".into(),
-                        None,
-                    );
+                        Bytes::from("Request timed out"),
+                    )
+                        .into_response();
                 }
             }
         }
         Err(SubscribeError::WaiterLimitReached) => {
-            return build_response(
+            return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "Too many concurrent requests".into(),
-                None,
-            );
+                Bytes::from("Too many concurrent requests"),
+            )
+                .into_response();
         }
         // get_or_subscribe creates a waiter when no entry exists, so NotFound is unreachable
         Err(SubscribeError::NotFound) => unreachable!(),
@@ -68,7 +68,7 @@ pub async fn get_handler(Path(id): Path<String>, State(state): State<AppState>) 
     // Auto-ACK to signal producer that consumer received the message
     state.pending_list.lock().await.ack(&id);
 
-    let mut response = build_response(StatusCode::OK, msg.body, msg.content_type);
+    let mut response = message_response(msg);
     response
         .headers_mut()
         .insert("Deprecation", HeaderValue::from_static("true"));
@@ -242,6 +242,40 @@ mod tests {
             server
                 .post("/link/ct-test")
                 .content_type("application/json")
+                .bytes(body)
+                .await;
+        };
+
+        tokio::join!(consumer, producer);
+    }
+
+    #[tokio::test]
+    async fn test_html_message_is_served_inert() {
+        let (server, _state) = HttpRelay::create_test_server(Config::default());
+
+        let consumer = async {
+            let response = server.get("/link/html-test").await;
+            assert_eq!(response.status_code(), 200);
+            assert_eq!(
+                response.header("content-type").to_str().unwrap(),
+                "text/html"
+            );
+            assert_eq!(
+                response.header("content-security-policy").to_str().unwrap(),
+                "sandbox"
+            );
+            assert_eq!(
+                response.header("x-content-type-options").to_str().unwrap(),
+                "nosniff"
+            );
+        };
+
+        let producer = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let body = Bytes::from_static(b"<script>alert(1)</script>");
+            server
+                .post("/link/html-test")
+                .content_type("text/html")
                 .bytes(body)
                 .await;
         };
