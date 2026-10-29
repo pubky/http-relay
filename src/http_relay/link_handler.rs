@@ -21,6 +21,7 @@ use axum::{
 #[cfg(test)]
 use super::response::MAX_ID_LENGTH;
 use super::response::{build_response, validate_id_length};
+use super::types::InsertOutcome;
 use super::waiting_list::{GetOrSubscribeResult, Message, SubscribeError};
 use super::AppState;
 
@@ -100,25 +101,32 @@ pub async fn post_handler(
     // Store message and subscribe for ACK notification
     let receiver = {
         let mut pending_list = state.pending_list.lock().await;
-        if let Err(e) = pending_list.store(id.clone(), message, state.config.link_timeout) {
-            tracing::error!(?e, "Failed to persist message");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Bytes::from("Failed to store message"),
-            )
-                .into_response();
+        match pending_list.store(id.clone(), message, state.config.link_timeout) {
+            Ok(InsertOutcome::Stored) => {}
+            Ok(InsertOutcome::StoreFull) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Bytes::from("Server at capacity"),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!(?e, "Failed to persist message");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Bytes::from("Failed to store message"),
+                )
+                    .into_response();
+            }
         }
 
         // Subscribe to get notified when consumer ACKs
         match pending_list.subscribe_ack(&id) {
             Ok(rx) => rx,
             Err(SubscribeError::NotFound) => {
-                // Entry was immediately evicted (shouldn't happen normally)
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Bytes::from("Server at capacity"),
-                )
-                    .into_response();
+                // Only reachable when the entry expired right after being stored
+                // (a near-zero link timeout); stored entries are never evicted.
+                return (StatusCode::NOT_FOUND, Bytes::from("Entry expired")).into_response();
             }
             Err(SubscribeError::WaiterLimitReached) => {
                 return (
@@ -134,7 +142,7 @@ pub async fn post_handler(
     let result = match tokio::time::timeout(state.config.link_timeout, receiver).await {
         Ok(Ok(())) => (StatusCode::OK, Bytes::new()),
         Ok(Err(_)) => {
-            // Entry expired or was evicted
+            // Entry expired, or was overwritten by another producer
             (StatusCode::NOT_FOUND, Bytes::from("Entry expired"))
         }
         Err(_) => (
@@ -299,6 +307,27 @@ mod tests {
         // 11th GET via HTTP should get 503
         let response = server.get("/link/get-limit").await;
         assert_eq!(response.status_code(), 503);
+    }
+
+    #[tokio::test]
+    async fn test_post_returns_503_when_store_is_full() {
+        let config = Config {
+            max_entries: 1,
+            link_timeout: Duration::from_millis(100),
+            ..Config::default()
+        };
+        let (server, _state) = HttpRelay::create_test_server(config);
+        let body = Bytes::from_static(b"undelivered");
+        let response = server.post("/inbox/occupied").bytes(body).await;
+        assert_eq!(response.status_code(), 200);
+
+        let body = Bytes::from_static(b"rejected");
+        let response = server.post("/link/new-channel").bytes(body).await;
+
+        assert_eq!(response.status_code(), 503);
+        assert_eq!(response.text(), "Server at capacity");
+        let response = server.get("/inbox/occupied").await;
+        assert_eq!(response.text(), "undelivered");
     }
 
     #[tokio::test]

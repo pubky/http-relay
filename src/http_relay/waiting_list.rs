@@ -10,6 +10,7 @@ use bytes::Bytes;
 use tokio::sync::oneshot;
 
 use super::persistence::EntryRepository;
+use super::types::InsertOutcome;
 use super::unix_timestamp_millis;
 
 /// Bounds concurrent long-poll connections per entry to prevent memory exhaustion.
@@ -129,26 +130,42 @@ impl WaitingList {
     /// On overwrite: message_waiters receive the new message; stale ack_waiters
     /// (from previous message) are dropped (their receivers get `RecvError`).
     ///
-    /// Returns an error if persistence fails. Waiters are notified regardless
-    /// of persistence success (message is delivered but may not survive restart).
-    pub fn store(&mut self, id: String, message: Message, ttl: Duration) -> anyhow::Result<()> {
+    /// Returns [`InsertOutcome::StoreFull`] if the repository has no room for a
+    /// new ID; the message is rejected and no waiters are notified.
+    ///
+    /// # Errors
+    /// Returns an error if persistence fails. Waiters are still notified in that
+    /// case (message is delivered but may not survive restart).
+    pub fn store(
+        &mut self,
+        id: String,
+        message: Message,
+        ttl: Duration,
+    ) -> anyhow::Result<InsertOutcome> {
         let expires_at = unix_timestamp_millis() + ttl.as_millis() as i64;
 
-        // Notify any waiting subscribers before persisting
-        if let Some(waiters) = self.waiters.get_mut(&id) {
-            waiters.notify_message_waiters(&message);
-            if waiters.is_empty() {
-                self.waiters.remove(&id);
-            }
-        }
-
-        // Persist to SQLite
-        self.repository.insert(
+        let insert_result = self.repository.insert(
             &id,
             &message.body,
             message.content_type.as_deref(),
             expires_at,
-        )
+        );
+
+        let message_rejected = matches!(insert_result, Ok(InsertOutcome::StoreFull));
+        if !message_rejected {
+            self.notify_message_waiters(&id, &message);
+        }
+
+        insert_result
+    }
+
+    fn notify_message_waiters(&mut self, id: &str, message: &Message) {
+        if let Some(waiters) = self.waiters.get_mut(id) {
+            waiters.notify_message_waiters(message);
+            if waiters.is_empty() {
+                self.waiters.remove(id);
+            }
+        }
     }
 
     /// Marks entry as acknowledged, clearing message payload and notifying waiters.
@@ -417,6 +434,31 @@ mod tests {
         // Old ack waiter should be dropped (receive error)
         let result = ack_rx.await;
         assert!(result.is_err(), "old ack waiter should be dropped");
+    }
+
+    // ========== Store capacity tests ==========
+
+    #[tokio::test]
+    async fn store_when_full_rejects_message_and_does_not_notify_waiters() {
+        let mut list = WaitingList::new_in_memory(1);
+        let ttl = Duration::from_secs(60);
+        list.store("undelivered".to_string(), make_message("first"), ttl)
+            .unwrap();
+        let mut rx = match list.get_or_subscribe("waiting").expect("should succeed") {
+            GetOrSubscribeResult::Waiting(rx) => rx,
+            GetOrSubscribeResult::Message(_) => panic!("expected waiting"),
+        };
+
+        let outcome = list
+            .store("waiting".to_string(), make_message("second"), ttl)
+            .unwrap();
+
+        assert_eq!(outcome, InsertOutcome::StoreFull);
+        assert!(
+            rx.try_recv().is_err(),
+            "waiter must not receive a rejected message"
+        );
+        assert!(list.waiters.contains_key("waiting"), "waiter keeps waiting");
     }
 
     // ========== Waiter limit tests ==========
