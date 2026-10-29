@@ -6,9 +6,10 @@
 //! that inbox. IDs must be cryptographically random (e.g., 128-bit UUIDs).
 //! Predictable IDs allow attackers to intercept or acknowledge messages.
 //!
-//! Messages persist in plaintext memory for the TTL duration. Do not relay
-//! sensitive one-time credentials unless encryption is applied at the
-//! application layer.
+//! Messages persist in plaintext until they're ACKed or expire. When
+//! persistence is enabled, deleted bodies can remain on disk after that (see
+//! "Deleted message bodies" in `persistence.rs`). Do not relay sensitive
+//! one-time credentials unless encryption is applied at the application layer.
 
 use axum::{
     body::Bytes,
