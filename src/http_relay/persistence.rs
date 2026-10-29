@@ -208,16 +208,26 @@ impl EntryRepository {
 
     /// Deletes all expired entries.
     ///
-    /// Returns the number of entries deleted.
-    pub fn cleanup_expired(&self) -> Result<usize> {
+    /// Returns the IDs of the deleted entries, so callers can release
+    /// resources tied to them without looking up each ID.
+    pub fn cleanup_expired(&self) -> Result<Vec<String>> {
         let connection = self.connection.lock().expect("Mutex poisoned");
         let current_time = unix_timestamp_millis();
 
-        let rows_deleted = connection
-            .execute("DELETE FROM entries WHERE expires_at < ?1", [current_time])
+        let mut statement = connection
+            .prepare("DELETE FROM entries WHERE expires_at < ?1 RETURNING id")
+            .context("Failed to prepare cleanup of expired entries")?;
+        let deleted_ids = statement
+            .query_map([current_time], |row| row.get(0))
+            .and_then(|rows| rows.collect::<rusqlite::Result<Vec<String>>>())
             .context("Failed to cleanup expired entries")?;
 
-        Ok(rows_deleted)
+        Ok(deleted_ids)
+    }
+
+    /// Returns the maximum number of entries before LRU eviction.
+    pub fn max_entries(&self) -> usize {
+        self.max_entries
     }
 
     /// Returns the total number of entries in the database.
@@ -340,8 +350,8 @@ mod tests {
             .insert("valid", b"new", None, future)
             .expect("Failed to insert");
 
-        let deleted_count = repository.cleanup_expired().expect("Failed to cleanup");
-        assert_eq!(deleted_count, 1);
+        let deleted_ids = repository.cleanup_expired().expect("Failed to cleanup");
+        assert_eq!(deleted_ids, vec!["expired".to_string()]);
 
         assert!(repository.get("expired").expect("Failed to get").is_none());
         assert!(repository.get("valid").expect("Failed to get").is_some());
