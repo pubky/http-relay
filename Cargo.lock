@@ -619,6 +619,7 @@ dependencies = [
  "futures-util",
  "http-body",
  "http-body-util",
+ "hyper-util",
  "ipnet",
  "rusqlite",
  "tcp-client-addr",
