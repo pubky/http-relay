@@ -5,6 +5,7 @@ use std::{net::IpAddr, path::PathBuf, time::Duration};
 use anyhow::Result;
 use clap::Parser;
 use http_relay::HttpRelayBuilder;
+use ipnet::IpNet;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
@@ -40,7 +41,8 @@ struct Args {
     #[arg(long, default_value_t = 2 * 1024)]
     max_body_size: usize,
 
-    /// Maximum entries in the waiting list (oldest entries evicted when full)
+    /// Maximum entries in the waiting list (oldest entries evicted when full).
+    /// Also limits the number of IDs with waiting requests (503 when full)
     #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES)]
     max_entries: usize,
 
@@ -56,6 +58,11 @@ struct Args {
     /// Enable permissive CORS headers (Access-Control-Allow-Origin: *)
     #[arg(long)]
     cors_allow_all: bool,
+
+    /// Require a PROXY protocol preface from this proxy (IP or CIDR, repeatable) and
+    /// identify clients by the address in it. Connections without one are rejected.
+    #[arg(long, value_name = "CIDR", value_parser = parse_network)]
+    proxy_protocol_trusted: Vec<IpNet>,
 
     /// Silence all output
     #[arg(short, long)]
@@ -78,6 +85,7 @@ async fn main() -> Result<()> {
         .max_entries(args.max_entries)
         .persist_db(args.persist_db)
         .cors_allow_all(args.cors_allow_all)
+        .proxy_protocol_trusted(args.proxy_protocol_trusted)
         .run()
         .await?;
 
@@ -102,6 +110,14 @@ async fn main() -> Result<()> {
     relay.shutdown().await?;
 
     Ok(())
+}
+
+/// Parses a CIDR network; a bare IP address means just that address.
+fn parse_network(value: &str) -> Result<IpNet, String> {
+    value
+        .parse::<IpNet>()
+        .or_else(|_| value.parse::<IpAddr>().map(IpNet::from))
+        .map_err(|_| format!("`{value}` is not an IP address or CIDR network"))
 }
 
 fn log_level(verbose: u8, quiet: bool) -> LevelFilter {
@@ -131,6 +147,20 @@ fn init_tracing(verbose: u8, quiet: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_network_accepts_cidr_and_bare_ip() {
+        assert_eq!(
+            parse_network("10.0.0.0/8"),
+            Ok("10.0.0.0/8".parse().unwrap())
+        );
+        assert_eq!(
+            parse_network("127.0.0.1"),
+            Ok("127.0.0.1/32".parse().unwrap())
+        );
+        assert_eq!(parse_network("::1"), Ok("::1/128".parse().unwrap()));
+        assert!(parse_network("localhost").is_err());
+    }
 
     #[test]
     fn test_quiet_overrides_verbose() {

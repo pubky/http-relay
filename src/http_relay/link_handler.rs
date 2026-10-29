@@ -21,7 +21,7 @@ use axum::{
 #[cfg(test)]
 use super::response::MAX_ID_LENGTH;
 use super::response::{message_response, validate_id_length};
-use super::waiting_list::{GetOrSubscribeResult, Message, SubscribeError};
+use super::waiting_list::{GetOrSubscribeResult, Message, StoreAndSubscribeError, SubscribeError};
 use super::AppState;
 
 /// GET /link/{id} - Consumer waits for producer, auto-ACKs on receive.
@@ -97,36 +97,35 @@ pub async fn post_handler(
         content_type,
     };
 
-    // Store message and subscribe for ACK notification
-    let receiver = {
-        let mut pending_list = state.pending_list.lock().await;
-        if let Err(e) = pending_list.store(id.clone(), message, state.config.link_timeout) {
+    let stored = state.pending_list.lock().await.store_and_subscribe_ack(
+        id,
+        message,
+        state.config.link_timeout,
+    );
+    let receiver = match stored {
+        Ok(rx) => rx,
+        Err(StoreAndSubscribeError::WaiterLimitReached) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Bytes::from("Too many concurrent requests"),
+            )
+                .into_response();
+        }
+        Err(StoreAndSubscribeError::NotFound) => {
+            // Entry was immediately evicted (shouldn't happen normally)
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Bytes::from("Server at capacity"),
+            )
+                .into_response();
+        }
+        Err(StoreAndSubscribeError::Storage(e)) => {
             tracing::error!(?e, "Failed to persist message");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Bytes::from("Failed to store message"),
             )
                 .into_response();
-        }
-
-        // Subscribe to get notified when consumer ACKs
-        match pending_list.subscribe_ack(&id) {
-            Ok(rx) => rx,
-            Err(SubscribeError::NotFound) => {
-                // Entry was immediately evicted (shouldn't happen normally)
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Bytes::from("Server at capacity"),
-                )
-                    .into_response();
-            }
-            Err(SubscribeError::WaiterLimitReached) => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Bytes::from("Too many concurrent requests"),
-                )
-                    .into_response();
-            }
         }
     };
 
@@ -333,6 +332,33 @@ mod tests {
         // 11th GET via HTTP should get 503
         let response = server.get("/link/get-limit").await;
         assert_eq!(response.status_code(), 503);
+    }
+
+    #[tokio::test]
+    async fn test_post_at_waiting_id_limit_does_not_store_message() {
+        // Regression test: a producer rejected with 503 must not leave its
+        // message behind for a consumer to fetch.
+        let config = Config {
+            max_entries: 1,
+            link_timeout: Duration::from_millis(100),
+            ..Config::default()
+        };
+        let (server, state) = HttpRelay::create_test_server(config);
+        let _waiting = state
+            .pending_list
+            .lock()
+            .await
+            .get_or_subscribe("occupied")
+            .expect("should subscribe");
+
+        let body = Bytes::from_static(b"rejected");
+        let response = server.post("/link/new-channel").bytes(body).await;
+
+        assert_eq!(response.status_code(), 503);
+        assert_eq!(
+            state.pending_list.lock().await.is_acked("new-channel"),
+            None
+        );
     }
 
     #[tokio::test]

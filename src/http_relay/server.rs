@@ -1,5 +1,11 @@
 //! HTTP relay server implementation.
 //!
+//! # Deployment assumptions
+//!
+//! The relay expects to run behind a reverse proxy that terminates TLS and limits
+//! request rates and connections per client IP. The relay itself has no
+//! authentication and no per-client limits. See "Deploy in production" in the README.
+//!
 //! # CORS Configuration
 //!
 //! By default, no CORS headers are added. This is suitable for deployments behind a reverse
@@ -17,11 +23,13 @@ use anyhow::Result;
 
 use axum::{extract::DefaultBodyLimit, routing::get, Router};
 use axum_server::Handle;
+use ipnet::IpNet;
 use tokio::sync::Mutex;
 
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use url::Url;
 
+use super::client_addr::ClientAddrAcceptor;
 use super::inbox;
 #[cfg(feature = "link-compat")]
 use super::link;
@@ -86,6 +94,9 @@ pub(crate) struct Config {
     pub persist_db: Option<PathBuf>,
     /// When true, adds permissive CORS headers (`Access-Control-Allow-Origin: *`).
     pub cors_allow_all: bool,
+    /// Proxy networks allowed to send a PROXY protocol preface. If empty, the client
+    /// is the TCP peer and no preface is expected.
+    pub proxy_protocol_trusted: Vec<IpNet>,
 }
 
 impl Default for Config {
@@ -100,6 +111,7 @@ impl Default for Config {
             max_entries: DEFAULT_MAX_ENTRIES,
             persist_db: None,
             cors_allow_all: false,
+            proxy_protocol_trusted: Vec::new(),
         }
     }
 }
@@ -150,6 +162,8 @@ impl HttpRelayBuilder {
 
     /// Configure the maximum entries in the waiting list (default: 10000).
     /// When this limit is reached, oldest entries are evicted.
+    /// It also limits the number of IDs with waiting requests; requests for new
+    /// IDs beyond it get `503 Service Unavailable`.
     pub fn max_entries(mut self, max: usize) -> Self {
         self.0.max_entries = max;
         self
@@ -165,6 +179,17 @@ impl HttpRelayBuilder {
     /// Enable permissive CORS headers (`Access-Control-Allow-Origin: *`).
     pub fn cors_allow_all(mut self, cors_allow_all: bool) -> Self {
         self.0.cors_allow_all = cors_allow_all;
+        self
+    }
+
+    /// Require a PROXY protocol preface from these proxy networks and identify each
+    /// client by the address in it (default: none, the client is the TCP peer).
+    ///
+    /// Once set, the relay rejects connections from any other address and connections
+    /// without a valid preface. A trusted proxy can claim any client address, so list
+    /// only proxies you control and keep the relay's port unreachable for anyone else.
+    pub fn proxy_protocol_trusted(mut self, networks: impl IntoIterator<Item = IpNet>) -> Self {
+        self.0.proxy_protocol_trusted = networks.into_iter().collect();
         self
     }
 
@@ -233,6 +258,13 @@ impl HttpRelay {
     }
 
     async fn start(config: Config) -> Result<Self> {
+        let acceptor = ClientAddrAcceptor::new(&config.proxy_protocol_trusted)?;
+        if !config.proxy_protocol_trusted.is_empty() {
+            tracing::info!(
+                trusted = ?config.proxy_protocol_trusted,
+                "PROXY protocol required"
+            );
+        }
         let app_state = AppState::new(config.clone())?;
         let app = Self::build_router(app_state.clone());
 
@@ -244,7 +276,7 @@ impl HttpRelay {
         http_listener.set_nonblocking(true)?;
         let http_address = http_listener.local_addr()?;
 
-        let server = axum_server::from_tcp(http_listener)?;
+        let server = axum_server::from_tcp(http_listener)?.acceptor(acceptor);
         tokio::spawn(async move {
             server
                 .handle(http_handle.clone())

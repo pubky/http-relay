@@ -13,6 +13,8 @@ mod waiting_list;
 
 // Server components (only with `server` feature)
 #[cfg(feature = "server")]
+mod client_addr;
+#[cfg(feature = "server")]
 pub(crate) mod inbox_handler;
 #[cfg(feature = "server")]
 mod response;
@@ -37,7 +39,9 @@ pub use server::{HttpRelay, HttpRelayBuilder};
 // Re-export core types for library users (available without server feature)
 pub use persistence::EntryRepository;
 pub use types::StoredEntry;
-pub use waiting_list::{GetOrSubscribeResult, Message, SubscribeError, WaitingList};
+pub use waiting_list::{
+    GetOrSubscribeResult, Message, StoreAndSubscribeError, SubscribeError, WaitingList,
+};
 
 /// Returns the current Unix timestamp in milliseconds.
 pub(crate) fn unix_timestamp_millis() -> i64 {
