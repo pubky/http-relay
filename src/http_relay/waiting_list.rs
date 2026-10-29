@@ -4,7 +4,7 @@
 //! Entries are persisted; oneshot channels for waiting requests cannot be persisted.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
@@ -17,6 +17,14 @@ use super::unix_timestamp_millis;
 /// Together with the limit on waiting IDs (see [`WaitingList`]), memory is bounded:
 /// with the default 10k IDs, worst case is 10k × 2 × 10 = ~200k oneshot channels.
 const MAX_WAITERS_PER_ENTRY: usize = 10;
+
+/// Minimum time between prunes of a full waiter map.
+///
+/// A prune scans every waiting ID while the caller holds the lock that every
+/// request needs. Without this interval, a flood of requests for new IDs at a
+/// full map would run one full scan per request. The cost: right after a prune,
+/// disconnected clients can keep new IDs out for up to this long.
+const FULL_MAP_PRUNE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Payload stored in the waiting list, cloned to multiple subscribers on delivery.
 ///
@@ -119,6 +127,8 @@ pub struct WaitingList {
     /// keeps a single capacity setting: the relay serves as many waiting IDs
     /// as it stores entries.
     max_waiting_ids: usize,
+    /// When a full waiter map was last pruned (see [`FULL_MAP_PRUNE_INTERVAL`]).
+    last_full_map_prune: Option<Instant>,
 }
 
 /// Error returned when subscribing to a waiting list entry fails.
@@ -148,6 +158,7 @@ impl WaitingList {
             repository,
             waiters: HashMap::new(),
             max_waiting_ids,
+            last_full_map_prune: None,
         }
     }
 
@@ -277,19 +288,40 @@ impl WaitingList {
         }
     }
 
-    /// Returns the waiters for `id`, adding an empty entry if the ID is new.
+    /// Checks that a waiter can be added for `id`.
     ///
     /// Returns `Err(SubscribeError::WaiterLimitReached)` if `id` is new and
-    /// `max_waiting_ids` IDs already have live waiters.
-    fn waiters_for(&mut self, id: &str) -> Result<&mut Waiters, SubscribeError> {
-        if !self.waiters.contains_key(id) && self.waiters.len() >= self.max_waiting_ids {
-            // Disconnected clients leave IDs behind until the next cleanup. Pruning
-            // them here means only open connections can keep new IDs out.
-            self.remove_closed_waiters();
-            if self.waiters.len() >= self.max_waiting_ids {
-                return Err(SubscribeError::WaiterLimitReached);
-            }
+    /// `max_waiting_ids` IDs already have live waiters. Call it before a side
+    /// effect that must not happen when the following subscribe fails, such as
+    /// storing a message whose producer then waits for the ACK.
+    pub fn ensure_waiter_capacity(&mut self, id: &str) -> Result<(), SubscribeError> {
+        if self.waiters.contains_key(id) || self.waiters.len() < self.max_waiting_ids {
+            return Ok(());
         }
+
+        // Disconnected clients leave IDs behind until the next cleanup. Pruning
+        // them here means only open connections can keep new IDs out.
+        let prune_due = self
+            .last_full_map_prune
+            .is_none_or(|last_prune| last_prune.elapsed() >= FULL_MAP_PRUNE_INTERVAL);
+        if prune_due {
+            self.remove_closed_waiters();
+            self.last_full_map_prune = Some(Instant::now());
+        }
+
+        if self.waiters.len() < self.max_waiting_ids {
+            Ok(())
+        } else {
+            Err(SubscribeError::WaiterLimitReached)
+        }
+    }
+
+    /// Returns the waiters for `id`, adding an empty entry if the ID is new.
+    ///
+    /// Returns `Err(SubscribeError::WaiterLimitReached)` if there is no room
+    /// for `id` (see [`Self::ensure_waiter_capacity`]).
+    fn waiters_for(&mut self, id: &str) -> Result<&mut Waiters, SubscribeError> {
+        self.ensure_waiter_capacity(id)?;
         Ok(self
             .waiters
             .entry(id.to_string())
@@ -553,6 +585,34 @@ mod tests {
 
         assert!(result.is_ok(), "closed waiters should not keep new IDs out");
         assert!(!list.waiters.contains_key("b"));
+    }
+
+    #[test]
+    fn full_map_is_pruned_at_most_once_per_interval() {
+        // Regression test: a flood of new IDs at a full map must not run a full
+        // prune per request while holding the global lock.
+        let mut list = WaitingList::new_in_memory(2);
+        let _waiting_a = list.get_or_subscribe("a").expect("should succeed");
+        drop(list.get_or_subscribe("b").expect("should succeed"));
+        let disconnected_c = list.get_or_subscribe("c").expect("prune frees b");
+        drop(disconnected_c);
+
+        let result = list.get_or_subscribe("d");
+
+        assert!(
+            matches!(result, Err(SubscribeError::WaiterLimitReached)),
+            "no second prune within FULL_MAP_PRUNE_INTERVAL"
+        );
+        assert!(list.waiters.contains_key("c"), "closed ID not pruned yet");
+    }
+
+    #[test]
+    fn ensure_waiter_capacity_does_not_add_id() {
+        let mut list = WaitingList::new_in_memory(1);
+
+        assert!(list.ensure_waiter_capacity("a").is_ok());
+
+        assert!(list.waiters.is_empty());
     }
 
     // ========== State transition tests ==========

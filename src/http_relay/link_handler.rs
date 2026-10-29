@@ -100,6 +100,18 @@ pub async fn post_handler(
     // Store message and subscribe for ACK notification
     let receiver = {
         let mut pending_list = state.pending_list.lock().await;
+
+        // Check before storing: a producer that gets 503 must be able to retry
+        // without its first message having been delivered already. Storing drops
+        // the ID's old ACK waiters, so the per-ID limit can't fail the subscribe.
+        if pending_list.ensure_waiter_capacity(&id).is_err() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Bytes::from("Too many concurrent requests"),
+            )
+                .into_response();
+        }
+
         if let Err(e) = pending_list.store(id.clone(), message, state.config.link_timeout) {
             tracing::error!(?e, "Failed to persist message");
             return (
@@ -299,6 +311,33 @@ mod tests {
         // 11th GET via HTTP should get 503
         let response = server.get("/link/get-limit").await;
         assert_eq!(response.status_code(), 503);
+    }
+
+    #[tokio::test]
+    async fn test_post_at_waiting_id_limit_does_not_store_message() {
+        // Regression test: a producer rejected with 503 must not leave its
+        // message behind for a consumer to fetch.
+        let config = Config {
+            max_entries: 1,
+            link_timeout: Duration::from_millis(100),
+            ..Config::default()
+        };
+        let (server, state) = HttpRelay::create_test_server(config);
+        let _waiting = state
+            .pending_list
+            .lock()
+            .await
+            .get_or_subscribe("occupied")
+            .expect("should subscribe");
+
+        let body = Bytes::from_static(b"rejected");
+        let response = server.post("/link/new-channel").bytes(body).await;
+
+        assert_eq!(response.status_code(), 503);
+        assert_eq!(
+            state.pending_list.lock().await.is_acked("new-channel"),
+            None
+        );
     }
 
     #[tokio::test]
