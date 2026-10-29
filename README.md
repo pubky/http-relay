@@ -53,7 +53,7 @@ http-relay = "0.6"
 # Default: bind to 127.0.0.1:8080 (localhost only)
 http-relay
 
-# Bind to all interfaces (for production/Docker)
+# Bind to all interfaces (for Docker, behind a reverse proxy)
 http-relay --bind 0.0.0.0
 
 # Custom configuration
@@ -68,10 +68,12 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--port <PORT>` | HTTP port (0 = random) | `8080` |
 | `--inbox-cache-ttl <SECS>` | Message TTL for inbox | `300` |
 | `--inbox-timeout <SECS>` | Inbox long-poll timeout | `25` |
+| `--link-timeout <SECS>` | Link endpoint timeout | `600` |
 | `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
-| `--max-entries <N>` | Max entries in waiting list | `10000` |
+| `--max-entries <N>` | Max entries in waiting list, and max IDs with waiting requests | `10000` |
 | `--persist-db <PATH>` | SQLite database path for persistence | (in-memory) |
 | `--cors-allow-all` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) | off |
+| `--proxy-protocol-trusted <CIDR>` | Require a PROXY protocol preface from this proxy and identify clients by it. Repeatable. See [DEPLOY.md](DEPLOY.md) | off (TCP peer) |
 | `-v` | Verbosity (repeat for more) | warn |
 | `-q, --quiet` | Silence output | - |
 
@@ -99,6 +101,12 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Deploy in production
+
+Run the relay behind a reverse proxy that terminates TLS. See
+[DEPLOY.md](DEPLOY.md) for the requirements, an Nginx setup, and how the relay
+identifies clients behind a proxy.
+
 ## API
 
 ### Inbox Endpoints
@@ -117,7 +125,8 @@ The primary API. Store-and-forward with explicit acknowledgment.
 **Inbox IDs act as shared secrets.** Anyone who knows an ID can read/write/ACK
 that inbox. IDs should be cryptographically random (e.g., 128-bit UUIDs).
 Predictable IDs allow attackers to intercept or acknowledge messages.
-Messages persist in plaintext memory for the TTL duration. Do not relay
+Messages persist in plaintext until they're ACKed or expire. With
+`--persist-db`, deleted bodies can remain on disk after that. Do not relay
 sensitive one-time credentials unless encryption is applied at the
 application layer.
 

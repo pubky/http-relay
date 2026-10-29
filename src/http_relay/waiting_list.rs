@@ -4,7 +4,7 @@
 //! Entries are persisted; oneshot channels for waiting requests cannot be persisted.
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tokio::sync::oneshot;
@@ -12,9 +12,19 @@ use tokio::sync::oneshot;
 use super::persistence::EntryRepository;
 use super::unix_timestamp_millis;
 
-/// Bounds concurrent long-poll connections per entry to prevent memory exhaustion.
-/// With 10k entries at 10 waiters each, worst case is ~100k oneshot channels.
+/// Bounds concurrent long-poll connections per ID and waiter kind (ACK or message).
+///
+/// Together with the limit on waiting IDs (see [`WaitingList`]), memory is bounded:
+/// with the default 10k IDs, worst case is 10k × 2 × 10 = ~200k oneshot channels.
 const MAX_WAITERS_PER_ENTRY: usize = 10;
+
+/// Minimum time between prunes of a full waiter map.
+///
+/// A prune scans every waiting ID while the caller holds the lock that every
+/// request needs. Without this interval, a flood of requests for new IDs at a
+/// full map would run one full scan per request. The cost: right after a prune,
+/// disconnected clients can keep new IDs out for up to this long.
+const FULL_MAP_PRUNE_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Payload stored in the waiting list, cloned to multiple subscribers on delivery.
 ///
@@ -49,7 +59,11 @@ impl Waiters {
     }
 
     /// Adds an ACK waiter. Returns false if limit reached.
+    ///
+    /// Closed senders are dropped first, so disconnected clients don't use up
+    /// the slots of a consumer that reconnects.
     fn add_ack_waiter(&mut self, sender: oneshot::Sender<()>) -> bool {
+        self.ack_waiters.retain(|sender| !sender.is_closed());
         if self.ack_waiters.len() >= MAX_WAITERS_PER_ENTRY {
             return false;
         }
@@ -58,12 +72,22 @@ impl Waiters {
     }
 
     /// Adds a message waiter. Returns false if limit reached.
+    ///
+    /// Closed senders are dropped first, so disconnected clients don't use up
+    /// the slots of a consumer that reconnects.
     fn add_message_waiter(&mut self, sender: oneshot::Sender<Message>) -> bool {
+        self.message_waiters.retain(|sender| !sender.is_closed());
         if self.message_waiters.len() >= MAX_WAITERS_PER_ENTRY {
             return false;
         }
         self.message_waiters.push(sender);
         true
+    }
+
+    /// Drops senders whose receivers are gone (client disconnected or timed out).
+    fn remove_closed_senders(&mut self) {
+        self.ack_waiters.retain(|sender| !sender.is_closed());
+        self.message_waiters.retain(|sender| !sender.is_closed());
     }
 
     /// Notifies all message waiters and clears the list.
@@ -92,19 +116,49 @@ impl Waiters {
 /// 1. **Inbox**: producer stores, consumer polls or long-polls for message
 /// 2. **Link**: producer stores, waits for ACK; consumer fetches and ACKs
 ///
-/// Memory is bounded by repository's max_entries and per-entry waiter limits.
+/// Memory is bounded by the repository's `max_entries` and by the waiter limits.
 pub struct WaitingList {
     repository: EntryRepository,
     waiters: HashMap<String, Waiters>,
+    /// Maximum number of distinct IDs in `waiters`.
+    ///
+    /// Consumers can wait for IDs that have no stored entry yet, so `waiters`
+    /// isn't bounded by the repository. Reusing the repository's `max_entries`
+    /// keeps a single capacity setting: the relay serves as many waiting IDs
+    /// as it stores entries.
+    max_waiting_ids: usize,
+    /// When a full waiter map was last pruned (see [`FULL_MAP_PRUNE_INTERVAL`]).
+    last_full_map_prune: Option<Instant>,
 }
 
 /// Error returned when subscribing to a waiting list entry fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscribeError {
-    /// Maximum waiters per entry reached.
+    /// Maximum waiters for this ID, or maximum number of waiting IDs, reached.
     WaiterLimitReached,
     /// Entry not found or expired.
     NotFound,
+}
+
+/// Error returned by [`WaitingList::store_and_subscribe_ack`].
+#[derive(Debug)]
+pub enum StoreAndSubscribeError {
+    /// Maximum waiters for this ID, or maximum number of waiting IDs, reached.
+    /// Nothing was stored.
+    WaiterLimitReached,
+    /// Entry expired right after being stored.
+    NotFound,
+    /// Persisting the message failed.
+    Storage(anyhow::Error),
+}
+
+impl From<SubscribeError> for StoreAndSubscribeError {
+    fn from(error: SubscribeError) -> Self {
+        match error {
+            SubscribeError::WaiterLimitReached => Self::WaiterLimitReached,
+            SubscribeError::NotFound => Self::NotFound,
+        }
+    }
 }
 
 /// Result of get_or_subscribe operation.
@@ -117,10 +171,15 @@ pub enum GetOrSubscribeResult {
 
 impl WaitingList {
     /// Creates a WaitingList with the given repository.
+    ///
+    /// The number of waiting IDs is limited to the repository's `max_entries`.
     pub fn new(repository: EntryRepository) -> Self {
+        let max_waiting_ids = repository.max_entries();
         Self {
             repository,
             waiters: HashMap::new(),
+            max_waiting_ids,
+            last_full_map_prune: None,
         }
     }
 
@@ -212,15 +271,30 @@ impl WaitingList {
         }
 
         let (tx, rx) = oneshot::channel();
-        let waiters = self
-            .waiters
-            .entry(id.to_string())
-            .or_insert_with(Waiters::new);
+        let waiters = self.waiters_for(id)?;
         if waiters.add_ack_waiter(tx) {
             Ok(rx)
         } else {
             Err(SubscribeError::WaiterLimitReached)
         }
+    }
+
+    /// Stores a message and subscribes its producer for the ACK (link pattern).
+    ///
+    /// Checks for waiter room before storing: a producer rejected with
+    /// `WaiterLimitReached` must be able to retry without its first message
+    /// having been delivered already.
+    pub fn store_and_subscribe_ack(
+        &mut self,
+        id: String,
+        message: Message,
+        ttl: Duration,
+    ) -> Result<oneshot::Receiver<()>, StoreAndSubscribeError> {
+        self.ensure_waiter_capacity(&id)?;
+        self.store(id.clone(), message, ttl)
+            .map_err(StoreAndSubscribeError::Storage)?;
+        // Storing drops the ID's old ACK waiters, so the per-ID limit can't fail here.
+        Ok(self.subscribe_ack(&id)?)
     }
 
     /// Atomically checks for message and subscribes if not present.
@@ -245,11 +319,7 @@ impl WaitingList {
 
         // No message - subscribe for notification
         let (tx, rx) = oneshot::channel();
-        let waiters = self
-            .waiters
-            .entry(id.to_string())
-            .or_insert_with(Waiters::new);
-
+        let waiters = self.waiters_for(id)?;
         if waiters.add_message_waiter(tx) {
             Ok(GetOrSubscribeResult::Waiting(rx))
         } else {
@@ -257,46 +327,76 @@ impl WaitingList {
         }
     }
 
-    /// Removes expired entries and cleans up stale waiters.
-    pub fn cleanup_expired(&mut self) -> usize {
-        // Identify expired entries BEFORE deleting them from repository
-        // (so we can clean up their waiters)
-        let expired_keys: Vec<String> = self
-            .waiters
-            .keys()
-            .filter(|id| {
-                match self.repository.get(id) {
-                    Ok(Some(entry)) => Self::is_expired(entry.expires_at),
-                    _ => false, // No entry yet or error - keep waiters
-                }
-            })
-            .cloned()
-            .collect();
+    /// Checks that a waiter can be added for `id`.
+    ///
+    /// Returns `Err(SubscribeError::WaiterLimitReached)` if `id` is new and
+    /// `max_waiting_ids` IDs already have live waiters. Doesn't add `id`, so
+    /// callers can check before a side effect that must not happen when the
+    /// following subscribe fails (see [`Self::store_and_subscribe_ack`]).
+    fn ensure_waiter_capacity(&mut self, id: &str) -> Result<(), SubscribeError> {
+        if self.waiters.contains_key(id) || self.waiters.len() < self.max_waiting_ids {
+            return Ok(());
+        }
 
-        // Delete expired entries from repository
-        let count = match self.repository.cleanup_expired() {
-            Ok(c) => c,
+        // Disconnected clients leave IDs behind until the next cleanup. Pruning
+        // them here means only open connections can keep new IDs out.
+        let prune_due = self
+            .last_full_map_prune
+            .is_none_or(|last_prune| last_prune.elapsed() >= FULL_MAP_PRUNE_INTERVAL);
+        if prune_due {
+            self.remove_closed_waiters();
+            self.last_full_map_prune = Some(Instant::now());
+        }
+
+        if self.waiters.len() < self.max_waiting_ids {
+            Ok(())
+        } else {
+            Err(SubscribeError::WaiterLimitReached)
+        }
+    }
+
+    /// Returns the waiters for `id`, adding an empty entry if the ID is new.
+    ///
+    /// Returns `Err(SubscribeError::WaiterLimitReached)` if there is no room
+    /// for `id` (see [`Self::ensure_waiter_capacity`]).
+    fn waiters_for(&mut self, id: &str) -> Result<&mut Waiters, SubscribeError> {
+        self.ensure_waiter_capacity(id)?;
+        Ok(self
+            .waiters
+            .entry(id.to_string())
+            .or_insert_with(Waiters::new))
+    }
+
+    /// Removes expired entries and the waiters that can no longer be served.
+    ///
+    /// Drops the waiters of the deleted entries, closed senders, and IDs left
+    /// without waiters. Waiters for IDs that have no entry yet are kept
+    /// (consumer arrives before producer).
+    ///
+    /// Returns the number of expired entries deleted.
+    pub fn cleanup_expired(&mut self) -> usize {
+        let expired_ids = match self.repository.cleanup_expired() {
+            Ok(ids) => ids,
             Err(e) => {
                 tracing::error!(?e, "Failed to cleanup expired entries");
-                0
+                Vec::new()
             }
         };
 
-        // Clean up closed senders (receivers dropped due to timeout)
-        for waiters in self.waiters.values_mut() {
-            waiters.ack_waiters.retain(|s| !s.is_closed());
-            waiters.message_waiters.retain(|s| !s.is_closed());
+        for id in &expired_ids {
+            self.waiters.remove(id);
         }
+        self.remove_closed_waiters();
 
-        // Remove empty waiter entries
-        self.waiters.retain(|_, w| !w.is_empty());
+        expired_ids.len()
+    }
 
-        // Remove waiters for entries that were expired
-        for key in expired_keys {
-            self.waiters.remove(&key);
-        }
-
-        count
+    /// Drops closed senders and removes IDs left without waiters.
+    fn remove_closed_waiters(&mut self) {
+        self.waiters.retain(|_, waiters| {
+            waiters.remove_closed_senders();
+            !waiters.is_empty()
+        });
     }
 
     /// Checks if an entry has expired based on its expires_at timestamp (in milliseconds).
@@ -429,10 +529,10 @@ mod tests {
         list.store("id1".to_string(), make_message("test"), ttl)
             .unwrap();
 
-        for _ in 0..MAX_WAITERS_PER_ENTRY {
-            let result = list.subscribe_ack("id1");
-            assert!(result.is_ok());
-        }
+        // Keep the receivers alive: closed senders don't count toward the limit
+        let _receivers: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
+            .map(|_| list.subscribe_ack("id1").expect("should subscribe"))
+            .collect();
 
         let result = list.subscribe_ack("id1");
         assert!(
@@ -445,17 +545,169 @@ mod tests {
     fn get_or_subscribe_returns_limit_error() {
         let mut list = create_test_list();
 
-        // Subscribe multiple times (no message stored yet)
-        for _ in 0..MAX_WAITERS_PER_ENTRY {
-            let result = list.get_or_subscribe("id1");
-            assert!(result.is_ok());
-        }
+        // Subscribe multiple times (no message stored yet), keeping the receivers alive
+        let _receivers: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
+            .map(|_| list.get_or_subscribe("id1").expect("should succeed"))
+            .collect();
 
         let result = list.get_or_subscribe("id1");
         assert!(
             matches!(result, Err(SubscribeError::WaiterLimitReached)),
             "expected WaiterLimitReached error"
         );
+    }
+
+    #[test]
+    fn closed_message_waiters_do_not_count_toward_limit() {
+        // Regression test: a reconnecting consumer must not be blocked by its own
+        // disconnected requests until the next cleanup.
+        let mut list = create_test_list();
+
+        for _ in 0..MAX_WAITERS_PER_ENTRY {
+            let result = list.get_or_subscribe("id1").expect("should succeed");
+            drop(result); // Client disconnected: receiver dropped, sender closed
+        }
+
+        assert!(list.get_or_subscribe("id1").is_ok());
+    }
+
+    #[test]
+    fn closed_ack_waiters_do_not_count_toward_limit() {
+        let mut list = create_test_list();
+        let ttl = Duration::from_secs(60);
+        list.store("id1".to_string(), make_message("test"), ttl)
+            .unwrap();
+
+        for _ in 0..MAX_WAITERS_PER_ENTRY {
+            let rx = list.subscribe_ack("id1").expect("should subscribe");
+            drop(rx);
+        }
+
+        assert!(list.subscribe_ack("id1").is_ok());
+    }
+
+    #[test]
+    fn new_id_beyond_waiting_id_limit_is_rejected() {
+        // Regression test: unique IDs must not grow the waiter map without bound.
+        let mut list = WaitingList::new_in_memory(2);
+        let _waiting_a = list.get_or_subscribe("a").expect("should succeed");
+        let _waiting_b = list.get_or_subscribe("b").expect("should succeed");
+
+        let result = list.get_or_subscribe("c");
+
+        assert!(
+            matches!(result, Err(SubscribeError::WaiterLimitReached)),
+            "expected WaiterLimitReached error"
+        );
+        assert!(!list.waiters.contains_key("c"));
+    }
+
+    #[test]
+    fn existing_id_accepts_waiters_at_waiting_id_limit() {
+        let mut list = WaitingList::new_in_memory(2);
+        let _waiting_a = list.get_or_subscribe("a").expect("should succeed");
+        let _waiting_b = list.get_or_subscribe("b").expect("should succeed");
+
+        let result = list.get_or_subscribe("a");
+
+        assert!(result.is_ok(), "existing ID should accept another waiter");
+    }
+
+    #[test]
+    fn new_id_reuses_slot_of_disconnected_waiters() {
+        let mut list = WaitingList::new_in_memory(2);
+        let _waiting_a = list.get_or_subscribe("a").expect("should succeed");
+        let disconnected_b = list.get_or_subscribe("b").expect("should succeed");
+        drop(disconnected_b);
+
+        let result = list.get_or_subscribe("c");
+
+        assert!(result.is_ok(), "closed waiters should not keep new IDs out");
+        assert!(!list.waiters.contains_key("b"));
+    }
+
+    #[test]
+    fn full_map_is_pruned_at_most_once_per_interval() {
+        // Regression test: a flood of new IDs at a full map must not run a full
+        // prune per request while holding the global lock.
+        let mut list = WaitingList::new_in_memory(2);
+        let _waiting_a = list.get_or_subscribe("a").expect("should succeed");
+        drop(list.get_or_subscribe("b").expect("should succeed"));
+        let disconnected_c = list.get_or_subscribe("c").expect("prune frees b");
+        drop(disconnected_c);
+
+        let result = list.get_or_subscribe("d");
+
+        assert!(
+            matches!(result, Err(SubscribeError::WaiterLimitReached)),
+            "no second prune within FULL_MAP_PRUNE_INTERVAL"
+        );
+        assert!(list.waiters.contains_key("c"), "closed ID not pruned yet");
+    }
+
+    #[test]
+    fn ensure_waiter_capacity_does_not_add_id() {
+        let mut list = WaitingList::new_in_memory(1);
+
+        assert!(list.ensure_waiter_capacity("a").is_ok());
+
+        assert!(list.waiters.is_empty());
+    }
+
+    // ========== store_and_subscribe_ack tests ==========
+
+    #[test]
+    fn store_and_subscribe_ack_at_waiting_id_limit_does_not_store() {
+        // Regression test: a producer rejected for lack of waiter room must not
+        // leave its message behind for a consumer to fetch.
+        let mut list = WaitingList::new_in_memory(1);
+        let _waiting = list.get_or_subscribe("occupied").expect("should succeed");
+
+        let result = list.store_and_subscribe_ack(
+            "new".to_string(),
+            make_message("rejected"),
+            Duration::from_secs(60),
+        );
+
+        assert!(
+            matches!(result, Err(StoreAndSubscribeError::WaiterLimitReached)),
+            "expected WaiterLimitReached error"
+        );
+        assert_eq!(list.is_acked("new"), None, "message must not be stored");
+    }
+
+    #[tokio::test]
+    async fn store_and_subscribe_ack_for_waiting_id_at_limit_succeeds() {
+        let mut list = WaitingList::new_in_memory(1);
+        let consumer = match list.get_or_subscribe("id1").expect("should succeed") {
+            GetOrSubscribeResult::Waiting(rx) => rx,
+            GetOrSubscribeResult::Message(_) => panic!("expected waiting"),
+        };
+
+        let result = list.store_and_subscribe_ack(
+            "id1".to_string(),
+            make_message("hello"),
+            Duration::from_secs(60),
+        );
+
+        assert!(result.is_ok(), "existing ID should accept the producer");
+        let received = consumer.await.expect("consumer should receive message");
+        assert_eq!(received.body, Bytes::from("hello"));
+    }
+
+    #[test]
+    fn store_and_subscribe_ack_replaces_ack_waiters_at_per_id_limit() {
+        let mut list = create_test_list();
+        let ttl = Duration::from_secs(60);
+        list.store("id1".to_string(), make_message("first"), ttl)
+            .unwrap();
+        let _receivers: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
+            .map(|_| list.subscribe_ack("id1").expect("should subscribe"))
+            .collect();
+
+        let result = list.store_and_subscribe_ack("id1".to_string(), make_message("second"), ttl);
+
+        assert!(result.is_ok(), "storing drops the old ACK waiters");
     }
 
     // ========== State transition tests ==========
