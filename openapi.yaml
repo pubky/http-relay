@@ -107,9 +107,11 @@ paths:
 
         Returns "true" if the message was acknowledged (DELETEd),
         "false" if the message exists but hasn't been acknowledged yet,
-        or 404 if no message exists (not posted yet, or expired).
+        or 404 if no message exists (not posted yet, expired, or deleted after
+        the ACK to make room in a full store).
 
-        Use this for polling scenarios. For blocking behavior, use `/await`.
+        Use this for polling scenarios. For blocking behavior, use `/await`,
+        which always sees the ACK while it waits.
       operationId: inboxAckStatus
       tags:
         - inbox

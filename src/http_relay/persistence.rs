@@ -491,6 +491,29 @@ mod tests {
     }
 
     #[test]
+    fn test_insert_when_over_lowered_limit_deletes_enough_acked_entries() {
+        let mut repository = EntryRepository::new(None, 4).expect("Failed to create repository");
+        let expires_at = unix_timestamp_millis() + 3_600_000;
+        insert_in_order(
+            &repository,
+            &["unacked", "acked-1", "acked-2", "acked-3"],
+            expires_at,
+        );
+        for id in ["acked-1", "acked-2", "acked-3"] {
+            repository.ack(id).unwrap();
+        }
+        // Same as reopening the database file with a lower `--max-entries`.
+        repository.max_entries = 2;
+
+        let outcome = repository.insert("new", b"body", None, expires_at).unwrap();
+
+        assert_eq!(outcome, InsertOutcome::Stored);
+        assert_eq!(repository.count().unwrap(), 2);
+        assert!(repository.get("unacked").unwrap().is_some());
+        assert!(repository.get("new").unwrap().is_some());
+    }
+
+    #[test]
     fn test_insert_existing_id_when_full_replaces_without_deleting_others() {
         let repository = EntryRepository::new(None, 3).expect("Failed to create repository");
         let expires_at = unix_timestamp_millis() + 3_600_000;
