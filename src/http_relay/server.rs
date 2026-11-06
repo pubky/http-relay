@@ -2,9 +2,10 @@
 //!
 //! # Deployment assumptions
 //!
-//! The relay expects to run behind a reverse proxy that terminates TLS and limits
-//! request rates and connections per client IP. The relay itself has no
-//! authentication and no per-client limits. See "Deploy in production" in the README.
+//! Production deployments require a reverse proxy that parses HTTP. The proxy
+//! terminates TLS, times out slow clients, and limits connections per client IP.
+//! The relay itself has no authentication, no per-client limits, and no
+//! protection against clients that send requests slowly. See `DEPLOY.md`.
 //!
 //! # CORS Configuration
 //!
@@ -21,7 +22,7 @@ use std::{
 
 use anyhow::Result;
 
-use axum::{extract::DefaultBodyLimit, routing::get, Router};
+use axum::{extract::DefaultBodyLimit, middleware, routing::get, Router};
 use axum_server::Handle;
 use ipnet::IpNet;
 use tokio::sync::Mutex;
@@ -29,7 +30,7 @@ use tokio::sync::Mutex;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use url::Url;
 
-use super::client_addr::ClientAddrAcceptor;
+use super::client_ip::{identify_client, TrustedProxies};
 use super::inbox;
 #[cfg(feature = "link-compat")]
 use super::link;
@@ -94,9 +95,9 @@ pub(crate) struct Config {
     pub persist_db: Option<PathBuf>,
     /// When true, adds permissive CORS headers (`Access-Control-Allow-Origin: *`).
     pub cors_allow_all: bool,
-    /// Proxy networks allowed to send a PROXY protocol preface. If empty, the client
-    /// is the TCP peer and no preface is expected.
-    pub proxy_protocol_trusted: Vec<IpNet>,
+    /// Proxy networks whose `X-Forwarded-For` header identifies the client. If
+    /// empty, the client is always the TCP peer.
+    pub trusted_proxies: Vec<IpNet>,
 }
 
 impl Default for Config {
@@ -111,7 +112,7 @@ impl Default for Config {
             max_entries: DEFAULT_MAX_ENTRIES,
             persist_db: None,
             cors_allow_all: false,
-            proxy_protocol_trusted: Vec::new(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -182,14 +183,16 @@ impl HttpRelayBuilder {
         self
     }
 
-    /// Require a PROXY protocol preface from these proxy networks and identify each
-    /// client by the address in it (default: none, the client is the TCP peer).
+    /// Identify clients behind these proxy networks by the `X-Forwarded-For` header
+    /// (default: none, the client is always the TCP peer).
     ///
-    /// Once set, the relay rejects connections from any other address and connections
-    /// without a valid preface. A trusted proxy can claim any client address, so list
-    /// only proxies you control and keep the relay's port unreachable for anyone else.
-    pub fn proxy_protocol_trusted(mut self, networks: impl IntoIterator<Item = IpNet>) -> Self {
-        self.0.proxy_protocol_trusted = networks.into_iter().collect();
+    /// For requests from a trusted proxy, the client is the rightmost entry that
+    /// isn't itself a trusted proxy. Such requests without a valid header get
+    /// `400 Bad Request`. Requests from other addresses are identified by their TCP
+    /// peer, and their header is ignored. A trusted proxy can claim any client
+    /// address, so list only proxies you control.
+    pub fn trusted_proxies(mut self, networks: impl IntoIterator<Item = IpNet>) -> Self {
+        self.0.trusted_proxies = networks.into_iter().collect();
         self
     }
 
@@ -207,8 +210,12 @@ pub struct HttpRelay {
 
 impl HttpRelay {
     /// Builds the router with all routes and middleware.
+    ///
+    /// The router must be served with `ConnectInfo<SocketAddr>`, because
+    /// [`identify_client`] needs the TCP peer address.
     fn build_router(state: AppState) -> Router {
         let max_body_size = state.config.max_body_size;
+        let trusted_proxies = TrustedProxies::new(&state.config.trusted_proxies);
         let router = Router::new()
             .route("/", get(|| async { "Http Relay" }))
             // Inbox: specific routes first to avoid conflicts with /{id}
@@ -230,6 +237,10 @@ impl HttpRelay {
 
         let router = router
             .layer(DefaultBodyLimit::max(max_body_size))
+            .layer(middleware::from_fn_with_state(
+                trusted_proxies,
+                identify_client,
+            ))
             .layer(TraceLayer::new_for_http());
 
         let router = if state.config.cors_allow_all {
@@ -250,19 +261,23 @@ impl HttpRelay {
     }
 
     /// Creates a test server with the given config. Returns both the server and app state.
+    ///
+    /// The server listens on a random local port, because the router needs the
+    /// connection's peer address.
     #[cfg(test)]
     pub(crate) fn create_test_server(config: Config) -> (axum_test::TestServer, AppState) {
         let (app, state) = Self::create_app(config).unwrap();
-        let server = axum_test::TestServer::new(app).unwrap();
+        let server =
+            axum_test::TestServer::new(app.into_make_service_with_connect_info::<SocketAddr>())
+                .unwrap();
         (server, state)
     }
 
     async fn start(config: Config) -> Result<Self> {
-        let acceptor = ClientAddrAcceptor::new(&config.proxy_protocol_trusted)?;
-        if !config.proxy_protocol_trusted.is_empty() {
+        if !config.trusted_proxies.is_empty() {
             tracing::info!(
-                trusted = ?config.proxy_protocol_trusted,
-                "PROXY protocol required"
+                trusted = ?config.trusted_proxies,
+                "Identifying clients behind trusted proxies by X-Forwarded-For"
             );
         }
         let app_state = AppState::new(config.clone())?;
@@ -276,11 +291,11 @@ impl HttpRelay {
         http_listener.set_nonblocking(true)?;
         let http_address = http_listener.local_addr()?;
 
-        let server = axum_server::from_tcp(http_listener)?.acceptor(acceptor);
+        let server = axum_server::from_tcp(http_listener)?;
         tokio::spawn(async move {
             server
                 .handle(http_handle.clone())
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>())
                 .await
                 .map_err(|error| tracing::error!(?error, "HttpRelay http server error"))
         });
