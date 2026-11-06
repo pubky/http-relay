@@ -70,7 +70,7 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--inbox-timeout <SECS>` | Inbox long-poll timeout | `25` |
 | `--link-timeout <SECS>` | Link endpoint timeout | `600` |
 | `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
-| `--max-entries <N>` | Max entries in waiting list, and max IDs with waiting requests | `10000` |
+| `--max-entries <N>` | Max stored entries, and max IDs with waiting requests. When the store is full, expired and ACKed entries make room; if there are none, `POST` to a new ID returns `503` | `10000` |
 | `--persist-db <PATH>` | SQLite database path for persistence | (in-memory) |
 | `--cors-allow-all` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) | off |
 | `--trusted-proxy <CIDR>` | Identify clients behind this proxy by `X-Forwarded-For`. Repeatable. See [DEPLOY.md](DEPLOY.md) | off (TCP peer) |
@@ -139,7 +139,8 @@ curl -X POST http://localhost:8080/inbox/my-channel \
 
 **Responses:**
 - `200 OK` - Message stored successfully
-- `503 Service Unavailable` - Server at capacity
+- `503 Service Unavailable` - Server at capacity: every stored entry still holds
+  an undelivered message. Existing messages are kept; retry later.
 
 #### GET `/inbox/{id}` - Retrieve Message (Long-Poll)
 
@@ -175,7 +176,9 @@ curl http://localhost:8080/inbox/my-channel/ack
 
 **Responses:**
 - `200 OK` - Body contains `true` (ACKed) or `false` (pending)
-- `404 Not Found` - No message exists (not posted yet, or expired)
+- `404 Not Found` - No message exists: not posted yet, expired, or deleted
+  after the ACK to make room in a full store. `/await` doesn't have this
+  problem for an ACK that happens while it waits.
 
 #### GET `/inbox/{id}/await` - Wait for ACK
 
