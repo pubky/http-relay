@@ -146,7 +146,8 @@ The relay's configuration stays the same. These directives need the
 - **Trust only your proxy.** A trusted proxy can claim any client address.
   Firewall the relay's port, or bind it to `127.0.0.1` or a private network, so
   nothing else can reach it. Trusting `127.0.0.1` trusts every process on the
-  host.
+  host. List only the proxies' own addresses, not whole networks where clients
+  also connect from: clients in a trusted network can claim any address.
 - **The proxy must set `X-Forwarded-For` itself.** It must either replace the
   header (`$remote_addr` in Nginx) or append the address it received the
   connection from (`$proxy_add_x_forwarded_for`). A proxy that passes the

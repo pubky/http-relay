@@ -69,8 +69,9 @@ impl TrustedProxies {
         // the client may be forged and is never parsed.
         let mut leftmost_proxy_ip = None;
         for value in headers.get_all(X_FORWARDED_FOR).iter().rev() {
+            // Escape non-ASCII bytes, such as `\xe9`, so the log shows them exactly.
             let value = value.to_str().map_err(|_| {
-                ForwardedForError::NotAnIpAddress(String::from_utf8_lossy(value.as_bytes()).into())
+                ForwardedForError::NotAnIpAddress(value.as_bytes().escape_ascii().to_string())
             })?;
             for entry in value
                 .rsplit(',')
@@ -146,7 +147,7 @@ pub(crate) async fn identify_client(
 
 #[cfg(test)]
 mod tests {
-    use axum::{middleware, routing::get, Extension, Router};
+    use axum::{http::HeaderValue, middleware, routing::get, Extension, Router};
     use axum_test::TestServer;
 
     use super::*;
@@ -297,6 +298,24 @@ mod tests {
             client,
             Err(ForwardedForError::NotAnIpAddress(
                 "198.51.100.8:4242".into()
+            ))
+        );
+    }
+
+    #[test]
+    fn entry_with_non_ascii_bytes_is_an_error_with_the_bytes_escaped() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            X_FORWARDED_FOR,
+            HeaderValue::from_bytes(b"198.51.100.8\xe9").unwrap(),
+        );
+
+        let client = trusted(&[NGINX_IP]).client_ip(ip(NGINX_IP), &headers);
+
+        assert_eq!(
+            client,
+            Err(ForwardedForError::NotAnIpAddress(
+                r"198.51.100.8\xe9".into()
             ))
         );
     }
