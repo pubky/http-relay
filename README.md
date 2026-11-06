@@ -73,7 +73,7 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--max-entries <N>` | Max entries in waiting list, and max IDs with waiting requests | `10000` |
 | `--persist-db <PATH>` | SQLite database path for persistence | (in-memory) |
 | `--cors-allow-all` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) | off |
-| `--proxy-protocol-trusted <CIDR>` | Require a PROXY protocol preface from this proxy and identify clients by it. Repeatable. See [DEPLOY.md](DEPLOY.md) | off (TCP peer) |
+| `--trusted-proxy <CIDR>` | Identify clients behind this proxy by `X-Forwarded-For`. Repeatable. See [DEPLOY.md](DEPLOY.md) | off (TCP peer) |
 | `-v` | Verbosity (repeat for more) | warn |
 | `-q, --quiet` | Silence output | - |
 
@@ -98,9 +98,10 @@ async fn main() -> anyhow::Result<()> {
 
 ## Deploy in production
 
-Run the relay behind a reverse proxy that terminates TLS. See
-[DEPLOY.md](DEPLOY.md) for the requirements, an Nginx setup, and how the relay
-identifies clients behind a proxy.
+Production deployments require a reverse proxy that parses HTTP. The proxy
+terminates TLS and protects the relay from slow clients, which the relay
+doesn't handle itself. See [DEPLOY.md](DEPLOY.md) for the requirements, an
+Nginx setup, and how the relay identifies clients behind a proxy.
 
 ## API
 

@@ -59,10 +59,10 @@ struct Args {
     #[arg(long)]
     cors_allow_all: bool,
 
-    /// Require a PROXY protocol preface from this proxy (IP or CIDR, repeatable) and
-    /// identify clients by the address in it. Connections without one are rejected.
+    /// Identify clients behind this proxy (IP or CIDR, repeatable) by the
+    /// X-Forwarded-For header. Its requests without a valid header get 400.
     #[arg(long, value_name = "CIDR", value_parser = parse_network)]
-    proxy_protocol_trusted: Vec<IpNet>,
+    trusted_proxy: Vec<IpNet>,
 
     /// Silence all output
     #[arg(short, long)]
@@ -85,7 +85,7 @@ async fn main() -> Result<()> {
         .max_entries(args.max_entries)
         .persist_db(args.persist_db)
         .cors_allow_all(args.cors_allow_all)
-        .proxy_protocol_trusted(args.proxy_protocol_trusted)
+        .trusted_proxies(args.trusted_proxy)
         .run()
         .await?;
 
