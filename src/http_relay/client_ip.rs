@@ -50,6 +50,9 @@ impl TrustedProxies {
     /// `X-Forwarded-For` that isn't itself a trusted proxy. If every entry is a
     /// trusted proxy, the leftmost entry is the client.
     ///
+    /// IPv4-mapped IPv6 addresses (`::ffff:198.51.100.8`) are returned as IPv4, so
+    /// the same client always gets the same address, however it was found.
+    ///
     /// # Errors
     ///
     /// Fails if a trusted proxy sends no entries, or if an entry checked before the
@@ -61,7 +64,7 @@ impl TrustedProxies {
         headers: &HeaderMap,
     ) -> Result<IpAddr, ForwardedForError> {
         if !self.contains(peer_ip) {
-            return Ok(peer_ip);
+            return Ok(peer_ip.to_canonical());
         }
 
         // Each proxy appends the address it received the connection from, so the
@@ -121,6 +124,9 @@ impl fmt::Display for ForwardedForError {
 
 /// Middleware that adds the [`ClientIp`] of each request as an extension.
 ///
+/// It also records the address in the `client_ip` field of the current span, if
+/// that span declares the field. The relay's `TraceLayer` span does.
+///
 /// Answers `400 Bad Request` if a trusted proxy doesn't send a valid
 /// `X-Forwarded-For` header. The relay never falls back to the proxy's own
 /// address, because that would make all of the proxy's clients look like one.
@@ -134,11 +140,14 @@ pub(crate) async fn identify_client(
 ) -> Response {
     match trusted_proxies.client_ip(peer.ip(), request.headers()) {
         Ok(client_ip) => {
+            tracing::Span::current().record("client_ip", tracing::field::display(client_ip));
             request.extensions_mut().insert(ClientIp(client_ip));
             next.run(request).await
         }
         Err(error) => {
-            // Only a trusted proxy can cause this, so it can't flood the log.
+            // A proxy that doesn't set the header triggers this warning on every
+            // request. Operators must notice that misconfiguration, so it stays at
+            // warn level instead of being sampled.
             tracing::warn!(%peer, %error, "Rejected request from trusted proxy");
             (StatusCode::BAD_REQUEST, "Invalid X-Forwarded-For header").into_response()
         }
@@ -270,6 +279,15 @@ mod tests {
         let headers = forwarded_for(&[CLIENT_IP]);
 
         let client = trusted(&[NGINX_IP]).client_ip(ip("::ffff:127.0.0.1"), &headers);
+
+        assert_eq!(client, Ok(ip(CLIENT_IP)));
+    }
+
+    #[test]
+    fn ipv4_mapped_untrusted_peer_is_returned_as_ipv4() {
+        let headers = HeaderMap::new();
+
+        let client = trusted(&[NGINX_IP]).client_ip(ip("::ffff:198.51.100.8"), &headers);
 
         assert_eq!(client, Ok(ip(CLIENT_IP)));
     }

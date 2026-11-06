@@ -52,7 +52,9 @@ the relay reads the header from the right:
 - It only reads the header from trusted proxies. For requests from any other
   address, the client is the TCP peer, and the header is ignored.
 - It skips entries that are themselves trusted proxies. If several proxies
-  forward a request, trust all of them.
+  forward a request, trust all of them. If every entry is a trusted proxy, the
+  leftmost entry is the client. This happens when a host inside a trusted
+  network sends the request.
 - It ignores everything to the left of the client's entry.
 
 The relay answers `400 Bad Request` when a trusted proxy sends no
@@ -64,6 +66,9 @@ share one address. Rejected requests appear in the relay's log as
 
 Repeat the flag to trust several networks. A bare IP, such as `127.0.0.1`,
 trusts only that address.
+
+To check which address the relay identifies, start it with `-vv`. Each request
+is then logged with a `client_ip` field.
 
 ## Run behind Nginx
 
@@ -120,7 +125,12 @@ Notes:
 - To also rate-limit requests per client, add a `limit_req_zone` and a
   `limit_req` directive.
 - If the relay runs in a container, trust the address Nginx connects from, such
-  as the Docker bridge gateway, instead of `127.0.0.1`.
+  as the Docker bridge gateway, instead of `127.0.0.1`. If you publish the
+  relay's port, publish it on the loopback address only, for example
+  `-p 127.0.0.1:8080:8080`. In some setups, such as rootless Docker and Docker
+  Desktop, connections to a published port arrive from the bridge gateway even
+  when they come from other hosts. On a port published on all interfaces, those
+  clients would count as a trusted proxy and could claim any address.
 
 ### Run behind a CDN
 

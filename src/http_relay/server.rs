@@ -22,7 +22,12 @@ use std::{
 
 use anyhow::Result;
 
-use axum::{extract::DefaultBodyLimit, middleware, routing::get, Router};
+use axum::{
+    extract::{DefaultBodyLimit, Request},
+    middleware,
+    routing::get,
+    Router,
+};
 use axum_server::Handle;
 use ipnet::IpNet;
 use tokio::sync::Mutex;
@@ -202,6 +207,20 @@ impl HttpRelayBuilder {
     }
 }
 
+/// Creates the span that `TraceLayer` wraps each request in.
+///
+/// Has the same fields as tower-http's default span, plus `client_ip`. The span
+/// starts before the client is known, so [`identify_client`] fills it in later.
+fn request_span(request: &Request) -> tracing::Span {
+    tracing::debug_span!(
+        "request",
+        method = %request.method(),
+        uri = %request.uri(),
+        version = ?request.version(),
+        client_ip = tracing::field::Empty,
+    )
+}
+
 /// An implementation of _some_ of [Http relay spec](https://httprelay.io/).
 pub struct HttpRelay {
     pub(crate) http_handle: Handle<SocketAddr>,
@@ -241,7 +260,7 @@ impl HttpRelay {
                 trusted_proxies,
                 identify_client,
             ))
-            .layer(TraceLayer::new_for_http());
+            .layer(TraceLayer::new_for_http().make_span_with(request_span));
 
         let router = if state.config.cors_allow_all {
             router.layer(CorsLayer::very_permissive())
