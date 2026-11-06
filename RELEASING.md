@@ -8,7 +8,11 @@
 
 ## Release Steps
 
-### 1. Bump the version and create version PR
+### 1. Run a security review
+
+Follow [SECURITY_REVIEW.md](SECURITY_REVIEW.md). Fix any findings before you continue.
+
+### 2. Bump the version and create version PR
 
 Make sure you are working on the most recent main branch.
 
@@ -37,7 +41,7 @@ git push origin chore/v0.7.0
 PR title: chore: v0.7.0
 PR description: Changelogs
 
-### 2. Tag and push
+### 3. Tag and push
 
 After the PR has been merged, tag the commit.
 
