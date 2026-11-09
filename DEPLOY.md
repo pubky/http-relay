@@ -86,7 +86,7 @@ itself is still allowed.
   behind carrier-grade NAT. Each user normally has only a few unACKed messages
   at a time, so the default leaves room for many users per address. Raise
   `--max-entries-per-client` if your users' clients get `429`. To turn the
-  limit off, set it to `--max-entries` or higher.
+  limit off, set it higher than `--max-entries`.
 - **What the limit doesn't cover:** clients with many addresses can still fill
   the store together. The limit raises the cost: with the defaults, filling the
   store takes 100 addresses or /56 networks. The relay doesn't limit request

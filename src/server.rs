@@ -196,7 +196,7 @@ impl HttpRelayBuilder {
     ///
     /// A client is an IPv4 address or an IPv6 /56 network; see
     /// [`Self::trusted_proxies`] for how the relay finds it. To turn the limit
-    /// off, set it to [`Self::max_entries`] or higher.
+    /// off, set it higher than [`Self::max_entries`].
     pub fn max_entries_per_client(mut self, max: usize) -> Self {
         self.0.max_entries_per_client = max;
         self

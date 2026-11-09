@@ -420,4 +420,24 @@ mod tests {
             InsertOutcome::ClientLimitReached
         );
     }
+
+    #[test]
+    fn limit_above_max_entries_is_off() {
+        let mut repository = test_repository_with_capacity(Capacity {
+            max_entries: 2,
+            max_entries_per_client: 3,
+        });
+        repository
+            .insert("a1", &message("a1"), TTL, alice())
+            .unwrap();
+        repository
+            .insert("a2", &message("a2"), TTL, alice())
+            .unwrap();
+
+        let outcome = repository
+            .insert("a3", &message("a3"), TTL, alice())
+            .unwrap();
+
+        assert_eq!(outcome, InsertOutcome::StoreFull);
+    }
 }
