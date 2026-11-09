@@ -81,9 +81,10 @@ impl EntryRepository {
     /// Finds the live unACKed entries that `owner` stored, except the one for
     /// `id`, which an insert for `id` replaces.
     ///
-    /// Scans every entry. That's cheap next to a request at the default
-    /// `max_entries`, and unlike a count per owner it can't go stale when
-    /// entries expire.
+    /// Scans every entry, so inserts get slower as the store grows: at 10,000
+    /// entries, the relay handles about a third as many as without the scan.
+    /// That's acceptable because this backend serves tests; deployments use
+    /// the `persist` feature, whose SQLite backend has an index on owners.
     fn other_unacked_entries(&self, owner: ClientNetwork, id: &str) -> OwnedEntries {
         let now = now_millis();
         let mut owned = OwnedEntries::default();

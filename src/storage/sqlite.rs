@@ -31,6 +31,11 @@ use rusqlite::{Connection, OptionalExtension};
 use super::{expires_at, now_millis, Capacity, InsertOutcome, Message, OwnedEntries, StoredEntry};
 use crate::client_ip::ClientNetwork;
 
+/// Maximum size of SQLite's page cache, in KiB. SQLite only fills it as
+/// needed. At 100,000 entries, raising it from the default of 2 MB to 64 MB
+/// doubled the insert rate with a database file.
+const CACHE_SIZE_KIB: u32 = 64 * 1024;
+
 /// Entries in a file-based or in-memory SQLite database.
 pub(crate) struct EntryRepository {
     connection: Connection,
@@ -54,6 +59,13 @@ impl EntryRepository {
         connection
             .execute_batch("PRAGMA secure_delete=ON;")
             .context("Failed to enable secure delete")?;
+
+        // Per-connection setting. The default cache of 2 MB can't hold the
+        // `owner` index: its keys are random hashes, so each insert writes to a
+        // random page, and with a database file each cache miss reads from disk.
+        connection
+            .execute_batch(&format!("PRAGMA cache_size=-{CACHE_SIZE_KIB};"))
+            .context("Failed to set the cache size")?;
 
         // In-memory databases don't support WAL.
         if path.is_some() {
@@ -314,6 +326,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(secure_delete, 1);
+    }
+
+    #[test]
+    fn cache_size_is_raised() {
+        let repository = EntryRepository::open(None, capacity(10)).unwrap();
+
+        let cache_size: i64 = repository
+            .connection
+            .query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(cache_size, -i64::from(CACHE_SIZE_KIB));
     }
 
     fn message() -> Message {
