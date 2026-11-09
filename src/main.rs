@@ -48,7 +48,11 @@ struct Args {
 
     /// Maximum unACKed messages one client (IPv4 address or IPv6 /56) can have
     /// stored. Further messages get 429
-    #[arg(long, default_value_t = HttpRelayBuilder::DEFAULT_MAX_ENTRIES_PER_CLIENT)]
+    #[arg(
+        long,
+        default_value_t = HttpRelayBuilder::DEFAULT_MAX_ENTRIES_PER_CLIENT,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
     max_entries_per_client: usize,
 
     /// Path to SQLite database for persistent storage.

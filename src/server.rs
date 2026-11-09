@@ -196,7 +196,8 @@ impl HttpRelayBuilder {
     ///
     /// A client is an IPv4 address or an IPv6 /56 network; see
     /// [`Self::trusted_proxies`] for how the relay finds it. To turn the limit
-    /// off, set it higher than [`Self::max_entries`].
+    /// off, set it higher than [`Self::max_entries`]. Must be at least 1;
+    /// otherwise [`Self::run`] fails.
     pub fn max_entries_per_client(mut self, max: usize) -> Self {
         self.0.max_entries_per_client = max;
         self
@@ -317,6 +318,11 @@ pub struct HttpRelay {
 
 impl HttpRelay {
     async fn start(config: Config) -> Result<Self> {
+        // A limit of 0 would reject every POST.
+        anyhow::ensure!(
+            config.max_entries_per_client > 0,
+            "max_entries_per_client must be at least 1"
+        );
         if !config.trusted_proxies.is_empty() {
             tracing::info!(
                 trusted = ?config.trusted_proxies,
@@ -398,6 +404,17 @@ impl Drop for HttpRelay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_run_rejects_a_client_limit_of_zero() {
+        let result = HttpRelayBuilder::default()
+            .http_port(0)
+            .max_entries_per_client(0)
+            .run()
+            .await;
+
+        assert!(result.is_err());
+    }
 
     #[tokio::test]
     async fn test_root_returns_http_relay() {
