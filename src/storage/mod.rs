@@ -71,12 +71,15 @@ fn expires_at(ttl: Duration) -> i64 {
 }
 
 /// Creates an empty in-memory repository of the compiled backend.
-#[cfg(test)]
+#[cfg(all(test, feature = "persist"))]
 pub(crate) fn test_repository(max_entries: usize) -> EntryRepository {
-    #[cfg(feature = "persist")]
-    return EntryRepository::open(None, max_entries).expect("in-memory SQLite opens");
-    #[cfg(not(feature = "persist"))]
-    return EntryRepository::new(max_entries);
+    EntryRepository::open(None, max_entries).expect("in-memory SQLite opens")
+}
+
+/// Creates an empty in-memory repository of the compiled backend.
+#[cfg(all(test, not(feature = "persist")))]
+pub(crate) fn test_repository(max_entries: usize) -> EntryRepository {
+    EntryRepository::new(max_entries)
 }
 
 #[cfg(test)]

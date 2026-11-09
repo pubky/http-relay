@@ -186,6 +186,8 @@ impl WaitingList {
         if acked {
             return Ok(Delivery::Ready(()));
         }
+        // Can't fail with `WaiterLimitReached` after the check above: `deliver`
+        // only removes waiters, and it removed all waiters for `id`.
         self.add_ack_waiter(id)
     }
 
@@ -278,7 +280,13 @@ impl WaitingList {
             }
         }
         if acked {
-            self.repository.ack(id)?;
+            // A link consumer already has the message, so the delivery
+            // succeeded. Failing it would make the producer retry and send the
+            // message twice. The cost: the entry stays unACKed until it
+            // expires, and the next consumer gets it again.
+            if let Err(error) = self.repository.ack(id) {
+                tracing::error!(?error, "Failed to store the ACK of a delivered message");
+            }
         }
         Ok(acked)
     }

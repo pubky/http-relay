@@ -9,6 +9,7 @@ use axum::{
     http::{header, request::Parts, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
+use tokio::sync::oneshot;
 
 use crate::storage::Message;
 use crate::waiting_list::{Delivery, WaitingListError};
@@ -88,16 +89,30 @@ impl IntoResponse for Message {
 }
 
 /// Returns the delivered value, waiting at most `timeout` for it.
+///
+/// A value sent while the timeout fires is still returned. The waiting list
+/// treats a successful send as delivered (a link producer gets its ACK), so
+/// dropping that value would lose the message.
 pub(crate) async fn wait_for<T>(delivery: Delivery<T>, timeout: Duration) -> Result<T, RelayError> {
-    match delivery {
-        Delivery::Ready(value) => Ok(value),
-        Delivery::Pending(receiver) => match tokio::time::timeout(timeout, receiver).await {
-            Ok(Ok(value)) => Ok(value),
-            // The entry expired, or a new message replaced it.
-            Ok(Err(_)) => Err(RelayError::NotFound),
-            Err(_) => Err(RelayError::Timeout),
-        },
+    let mut receiver = match delivery {
+        Delivery::Ready(value) => return Ok(value),
+        Delivery::Pending(receiver) => receiver,
+    };
+    match tokio::time::timeout(timeout, &mut receiver).await {
+        Ok(Ok(value)) => Ok(value),
+        // The entry expired, or a new message replaced it.
+        Ok(Err(_)) => Err(RelayError::NotFound),
+        Err(_) => take_value_sent_before_timeout(receiver),
     }
+}
+
+/// Closes the channel of a timed-out wait and returns a value that was sent
+/// before it closed, or [`RelayError::Timeout`].
+///
+/// After `close`, every send fails, so no value can arrive unseen.
+fn take_value_sent_before_timeout<T>(mut receiver: oneshot::Receiver<T>) -> Result<T, RelayError> {
+    receiver.close();
+    receiver.try_recv().map_err(|_| RelayError::Timeout)
 }
 
 /// Why a request failed.
@@ -167,11 +182,33 @@ mod tests {
 
     #[tokio::test]
     async fn closed_delivery_is_not_found() {
-        let (sender, receiver) = tokio::sync::oneshot::channel::<()>();
+        let (sender, receiver) = oneshot::channel::<()>();
         drop(sender);
 
         let result = wait_for(Delivery::Pending(receiver), Duration::from_secs(1)).await;
 
         assert!(matches!(result, Err(RelayError::NotFound)));
+    }
+
+    #[test]
+    fn value_sent_as_the_timeout_fires_is_returned() {
+        // Regression test: a link consumer timed out with 408 while its
+        // producer got the ACK for the message the consumer never returned.
+        let (sender, receiver) = oneshot::channel();
+        sender.send("message").unwrap();
+
+        let result = take_value_sent_before_timeout(receiver);
+
+        assert!(matches!(result, Ok("message")));
+    }
+
+    #[tokio::test]
+    async fn timeout_without_value_fails_later_sends() {
+        let (sender, receiver) = oneshot::channel::<()>();
+
+        let result = wait_for(Delivery::Pending(receiver), Duration::ZERO).await;
+
+        assert!(matches!(result, Err(RelayError::Timeout)));
+        assert!(sender.send(()).is_err());
     }
 }

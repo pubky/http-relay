@@ -75,10 +75,15 @@ impl EntryRepository {
     /// Stores `message` for `id`, replacing any previous entry and its ACK.
     ///
     /// A new ID in a full store first needs room; see the module docs of
-    /// [`super`].
+    /// [`super`]. Runs in one transaction: if it fails, no entry was deleted
+    /// to make room.
     pub fn insert(&mut self, id: &str, message: &Message, ttl: Duration) -> Result<InsertOutcome> {
-        let exists: bool = self
+        let transaction = self
             .connection
+            .transaction()
+            .context("Failed to begin insert transaction")?;
+
+        let exists: bool = transaction
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM entries WHERE id = ?1)",
                 [id],
@@ -88,13 +93,14 @@ impl EntryRepository {
         let removed_ids = if exists {
             Vec::new()
         } else {
-            match self.make_room()? {
+            match make_room(&transaction, self.max_entries)? {
                 Some(removed_ids) => removed_ids,
+                // Dropping the transaction rolls it back; nothing was changed.
                 None => return Ok(InsertOutcome::StoreFull),
             }
         };
 
-        self.connection
+        transaction
             .execute(
                 "INSERT OR REPLACE INTO entries (id, message_body, content_type, acked, expires_at, created_at) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
                 rusqlite::params![
@@ -106,52 +112,11 @@ impl EntryRepository {
                 ],
             )
             .context("Failed to insert entry")?;
+        transaction
+            .commit()
+            .context("Failed to commit insert transaction")?;
 
         Ok(InsertOutcome::Stored { removed_ids })
-    }
-
-    /// Deletes expired entries, then ACKed ones stored longest ago, until there is room for
-    /// one more. Returns their IDs, or `None` without deleting anything if
-    /// that isn't enough.
-    fn make_room(&mut self) -> Result<Option<Vec<String>>> {
-        let (count, removable): (usize, usize) = self
-            .connection
-            .query_row(
-                "SELECT COUNT(*), COUNT(*) FILTER (WHERE expires_at <= ?1 OR acked = 1) FROM entries",
-                [now_millis()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .context("Failed to count entries")?;
-        // More than one entry is over the limit if `max_entries` was lowered
-        // since the database file was written.
-        let excess = (count + 1).saturating_sub(self.max_entries);
-        if excess == 0 {
-            return Ok(Some(Vec::new()));
-        }
-        if removable < excess {
-            return Ok(None);
-        }
-
-        let mut removed_ids = self.remove_expired()?;
-        let acked_to_remove = excess.saturating_sub(removed_ids.len());
-        if acked_to_remove > 0 {
-            // `INSERT OR REPLACE` gives a replaced row a new rowid, so rowid
-            // orders entries stored in the same millisecond.
-            let mut statement = self
-                .connection
-                .prepare(
-                    "DELETE FROM entries WHERE id IN (
-                        SELECT id FROM entries WHERE acked = 1 ORDER BY created_at, rowid LIMIT ?1
-                    ) RETURNING id",
-                )
-                .context("Failed to prepare deletion of ACKed entries")?;
-            let acked_ids = statement
-                .query_map([acked_to_remove], |row| row.get(0))
-                .and_then(|rows| rows.collect::<rusqlite::Result<Vec<String>>>())
-                .context("Failed to delete ACKed entries")?;
-            removed_ids.extend(acked_ids);
-        }
-        Ok(Some(removed_ids))
     }
 
     /// Returns the live entry for `id`.
@@ -193,15 +158,66 @@ impl EntryRepository {
 
     /// Deletes all expired entries and returns their IDs.
     pub fn remove_expired(&mut self) -> Result<Vec<String>> {
-        let mut statement = self
-            .connection
-            .prepare("DELETE FROM entries WHERE expires_at <= ?1 RETURNING id")
-            .context("Failed to prepare cleanup of expired entries")?;
-        statement
-            .query_map([now_millis()], |row| row.get(0))
-            .and_then(|rows| rows.collect::<rusqlite::Result<Vec<String>>>())
-            .context("Failed to cleanup expired entries")
+        delete_expired(&self.connection)
     }
+}
+
+/// Deletes expired entries, then ACKed ones stored longest ago, until there is
+/// room for one more. Returns their IDs, or `None` without deleting anything if
+/// that isn't enough.
+fn make_room(connection: &Connection, max_entries: usize) -> Result<Option<Vec<String>>> {
+    let count: usize = connection
+        .query_row("SELECT COUNT(*) FROM entries", [], |row| row.get(0))
+        .context("Failed to count entries")?;
+    // More than one entry is over the limit if `max_entries` was lowered
+    // since the database file was written.
+    let excess = (count + 1).saturating_sub(max_entries);
+    if excess == 0 {
+        return Ok(Some(Vec::new()));
+    }
+
+    // Only a full store pays for this scan: `acked` has no index.
+    let removable: usize = connection
+        .query_row(
+            "SELECT COUNT(*) FROM entries WHERE expires_at <= ?1 OR acked = 1",
+            [now_millis()],
+            |row| row.get(0),
+        )
+        .context("Failed to count removable entries")?;
+    if removable < excess {
+        return Ok(None);
+    }
+
+    let mut removed_ids = delete_expired(connection)?;
+    let acked_to_remove = excess.saturating_sub(removed_ids.len());
+    if acked_to_remove > 0 {
+        // `INSERT OR REPLACE` gives a replaced row a new rowid, so rowid
+        // orders entries stored in the same millisecond.
+        let mut statement = connection
+            .prepare(
+                "DELETE FROM entries WHERE id IN (
+                    SELECT id FROM entries WHERE acked = 1 ORDER BY created_at, rowid LIMIT ?1
+                ) RETURNING id",
+            )
+            .context("Failed to prepare deletion of ACKed entries")?;
+        let acked_ids = statement
+            .query_map([acked_to_remove], |row| row.get(0))
+            .and_then(|rows| rows.collect::<rusqlite::Result<Vec<String>>>())
+            .context("Failed to delete ACKed entries")?;
+        removed_ids.extend(acked_ids);
+    }
+    Ok(Some(removed_ids))
+}
+
+/// Deletes all expired entries and returns their IDs.
+fn delete_expired(connection: &Connection) -> Result<Vec<String>> {
+    let mut statement = connection
+        .prepare("DELETE FROM entries WHERE expires_at <= ?1 RETURNING id")
+        .context("Failed to prepare cleanup of expired entries")?;
+    statement
+        .query_map([now_millis()], |row| row.get(0))
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<String>>>())
+        .context("Failed to cleanup expired entries")
 }
 
 #[cfg(test)]
@@ -228,6 +244,26 @@ mod tests {
             body: Bytes::from_static(b"body"),
             content_type: None,
         }
+    }
+
+    #[test]
+    fn failed_insert_keeps_the_entries_it_would_remove() {
+        let mut repository = EntryRepository::open(None, 1).unwrap();
+        repository.insert("acked", &message(), TTL).unwrap();
+        repository.ack("acked").unwrap();
+        // Makes the insert fail after `make_room` deleted "acked".
+        repository
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_insert BEFORE INSERT ON entries
+                 WHEN NEW.id = 'fails' BEGIN SELECT RAISE(ABORT, 'insert failed'); END;",
+            )
+            .unwrap();
+
+        let result = repository.insert("fails", &message(), TTL);
+
+        assert!(result.is_err());
+        assert_eq!(repository.get("acked").unwrap(), Some(StoredEntry::Acked));
     }
 
     fn temp_directory(name: &str) -> std::path::PathBuf {

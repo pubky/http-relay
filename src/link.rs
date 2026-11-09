@@ -30,10 +30,14 @@ pub(crate) fn routes() -> Router<AppState> {
         .layer(map_response(mark_deprecated))
 }
 
+/// The `Deprecation` header value (RFC 9745): the endpoints have been
+/// deprecated since v0.6.0-rc.0, released on 2026-03-05 (Unix seconds).
+const DEPRECATED_SINCE: &str = "@1772668800";
+
 async fn mark_deprecated(mut response: Response) -> Response {
     response.headers_mut().insert(
         HeaderName::from_static("deprecation"),
-        HeaderValue::from_static("true"),
+        HeaderValue::from_static(DEPRECATED_SINCE),
     );
     response
 }
@@ -51,8 +55,9 @@ async fn post_message(
     message: Message,
 ) -> Result<(), RelayError> {
     let timeout = state.config.link_timeout;
-    // The message expires just before its producer stops waiting, so no
-    // consumer can fetch it after the producer got 408.
+    // The message expires before its producer stops waiting, so no consumer
+    // can fetch it after the producer got 408: the expiry time is set while
+    // the message is stored, and the producer's timeout starts after that.
     let ttl = timeout;
     let delivery = state
         .waiting_list
@@ -163,14 +168,14 @@ mod tests {
 
         let consumer = async {
             let response = server.get("/link/deprecation-test").await;
-            assert_eq!(response.header("Deprecation"), "true");
+            assert_eq!(response.header("Deprecation"), "@1772668800");
         };
 
         let producer = async {
             tokio::time::sleep(Duration::from_millis(20)).await;
             let body = Bytes::from_static(b"test");
             let response = server.post("/link/deprecation-test").bytes(body).await;
-            assert_eq!(response.header("Deprecation"), "true");
+            assert_eq!(response.header("Deprecation"), "@1772668800");
         };
 
         tokio::join!(consumer, producer);
