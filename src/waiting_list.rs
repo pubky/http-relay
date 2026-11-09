@@ -42,8 +42,10 @@ pub(crate) enum WaitingListError {
     /// Maximum waiters for this ID, or maximum number of waiting IDs, reached.
     WaiterLimitReached,
     /// The client already has as many unACKed messages stored as it may.
-    /// Nothing was stored.
-    ClientLimitReached,
+    /// Nothing was stored. One of its messages expires after `retry_after`.
+    ClientLimitReached {
+        retry_after: Duration,
+    },
     /// The store has no room for a new ID. Nothing was stored.
     StoreFull,
     Storage(anyhow::Error),
@@ -274,7 +276,9 @@ impl WaitingList {
                     self.take_ack_waiters(removed_id);
                 }
             }
-            InsertOutcome::ClientLimitReached => return Err(WaitingListError::ClientLimitReached),
+            InsertOutcome::ClientLimitReached { retry_after } => {
+                return Err(WaitingListError::ClientLimitReached { retry_after })
+            }
             InsertOutcome::StoreFull => return Err(WaitingListError::StoreFull),
         }
 

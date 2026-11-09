@@ -457,6 +457,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_429_says_when_the_clients_first_message_expires() {
+        let server = test_server(Config {
+            max_entries_per_client: 1,
+            inbox_cache_ttl: Duration::from_secs(30),
+            ..Config::default()
+        });
+        server
+            .post("/inbox/first")
+            .bytes(Bytes::from_static(b"m"))
+            .await;
+
+        let rejected = server
+            .post("/inbox/second")
+            .bytes(Bytes::from_static(b"m"))
+            .await;
+
+        assert_eq!(rejected.status_code(), 429);
+        let retry_after: u64 = rejected
+            .header("retry-after")
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(
+            (29..=30).contains(&retry_after),
+            "Retry-After: {retry_after}"
+        );
+    }
+
+    #[tokio::test]
     async fn test_ack_frees_room_under_the_client_limit() {
         let server = server_with_limit_of_one();
         post_as(&server, "198.51.100.1", "/inbox/first").await;

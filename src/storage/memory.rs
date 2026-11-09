@@ -4,7 +4,7 @@ use std::{collections::HashMap, time::Duration};
 
 use anyhow::Result;
 
-use super::{expires_at, now_millis, Capacity, InsertOutcome, Message, StoredEntry};
+use super::{expires_at, now_millis, Capacity, InsertOutcome, Message, OwnedEntries, StoredEntry};
 use crate::client_ip::ClientNetwork;
 
 struct Entry {
@@ -52,8 +52,9 @@ impl EntryRepository {
         ttl: Duration,
         owner: ClientNetwork,
     ) -> Result<InsertOutcome> {
-        if self.count_other_unacked_entries(owner, id) >= self.capacity.max_entries_per_client {
-            return Ok(InsertOutcome::ClientLimitReached);
+        let owned = self.other_unacked_entries(owner, id);
+        if owned.count >= self.capacity.max_entries_per_client {
+            return Ok(owned.limit_reached());
         }
 
         let mut removed_ids = Vec::new();
@@ -77,19 +78,30 @@ impl EntryRepository {
         Ok(InsertOutcome::Stored { removed_ids })
     }
 
-    /// Counts the live unACKed entries that `owner` stored, except the one
-    /// for `id`, which an insert for `id` replaces.
-    fn count_other_unacked_entries(&self, owner: ClientNetwork, id: &str) -> usize {
+    /// Finds the live unACKed entries that `owner` stored, except the one for
+    /// `id`, which an insert for `id` replaces.
+    ///
+    /// Scans every entry. That's cheap next to a request at the default
+    /// `max_entries`, and unlike a count per owner it can't go stale when
+    /// entries expire.
+    fn other_unacked_entries(&self, owner: ClientNetwork, id: &str) -> OwnedEntries {
         let now = now_millis();
-        self.entries
-            .iter()
-            .filter(|(entry_id, entry)| {
-                entry.owner == owner
-                    && entry.message.is_some()
-                    && entry.expires_at > now
-                    && entry_id.as_str() != id
-            })
-            .count()
+        let mut owned = OwnedEntries::default();
+        let others = self.entries.iter().filter(|(entry_id, entry)| {
+            entry.owner == owner
+                && entry.message.is_some()
+                && entry.expires_at > now
+                && entry_id.as_str() != id
+        });
+        for (_, entry) in others {
+            owned.count += 1;
+            owned.first_expires_at = Some(
+                owned
+                    .first_expires_at
+                    .map_or(entry.expires_at, |first| first.min(entry.expires_at)),
+            );
+        }
+        owned
     }
 
     /// Deletes expired entries, then ACKed ones stored longest ago, until there is room for

@@ -403,6 +403,14 @@ components:
         IPv4 address or an IPv6 /56 network. The new message is not stored.
         Replacing a message the client stored itself is still allowed. Retry
         after one of the client's messages is acknowledged or expires.
+      headers:
+        Retry-After:
+          description: |
+            Seconds until the client's first unacknowledged message expires,
+            rounded up. An acknowledgement can make room sooner.
+          schema:
+            type: integer
+            minimum: 1
       content:
         text/plain:
           schema:

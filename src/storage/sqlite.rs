@@ -28,7 +28,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use rusqlite::{Connection, OptionalExtension};
 
-use super::{expires_at, now_millis, Capacity, InsertOutcome, Message, StoredEntry};
+use super::{expires_at, now_millis, Capacity, InsertOutcome, Message, OwnedEntries, StoredEntry};
 use crate::client_ip::ClientNetwork;
 
 /// Entries in a file-based or in-memory SQLite database.
@@ -110,15 +110,20 @@ impl EntryRepository {
             .transaction()
             .context("Failed to begin insert transaction")?;
 
-        let other_unacked_entries: usize = transaction
+        let owned = transaction
             .query_row(
-                "SELECT COUNT(*) FROM entries WHERE owner = ?1 AND id != ?2 AND acked = 0 AND expires_at > ?3",
+                "SELECT COUNT(*), MIN(expires_at) FROM entries WHERE owner = ?1 AND id != ?2 AND acked = 0 AND expires_at > ?3",
                 rusqlite::params![owner_hash, id, now_millis()],
-                |row| row.get(0),
+                |row| {
+                    Ok(OwnedEntries {
+                        count: row.get(0)?,
+                        first_expires_at: row.get(1)?,
+                    })
+                },
             )
             .context("Failed to count the owner's entries")?;
-        if other_unacked_entries >= self.capacity.max_entries_per_client {
-            return Ok(InsertOutcome::ClientLimitReached);
+        if owned.count >= self.capacity.max_entries_per_client {
+            return Ok(owned.limit_reached());
         }
 
         let exists: bool = transaction

@@ -151,7 +151,8 @@ curl -X POST http://localhost:8080/inbox/my-channel \
 - `200 OK` - Message stored successfully
 - `429 Too Many Requests` - This client already has the maximum number of
   unACKed messages stored (`--max-entries-per-client`). Replacing one of them
-  is still allowed. Retry after one is ACKed or expires.
+  is still allowed. Retry after one is ACKed or expires; the `Retry-After`
+  header gives the seconds until the first one expires.
 - `503 Service Unavailable` - Server at capacity: every stored entry still holds
   an undelivered message. Existing messages are kept; retry later.
 

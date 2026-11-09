@@ -70,8 +70,9 @@ pub(crate) enum InsertOutcome {
     /// entries deleted to make room.
     Stored { removed_ids: Vec<String> },
     /// The client already owns `max_entries_per_client` other live unACKed
-    /// entries. Nothing was changed.
-    ClientLimitReached,
+    /// entries. Nothing was changed. `retry_after` is the time until the first
+    /// of them expires; an ACK can make room sooner.
+    ClientLimitReached { retry_after: Duration },
     /// Every entry holds an unACKed message, so there is no room for a new ID.
     /// Nothing was changed.
     StoreFull,
@@ -88,6 +89,26 @@ fn now_millis() -> i64 {
 /// Returns when an entry stored now with `ttl` expires, in Unix milliseconds.
 fn expires_at(ttl: Duration) -> i64 {
     now_millis().saturating_add(i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// The live unACKed entries a client owns, apart from the one an insert
+/// replaces. Counted against `max_entries_per_client`.
+#[derive(Default)]
+struct OwnedEntries {
+    count: usize,
+    /// When the first of them expires, in Unix milliseconds.
+    first_expires_at: Option<i64>,
+}
+
+impl OwnedEntries {
+    /// Returns the outcome of an insert rejected because of these entries.
+    fn limit_reached(&self) -> InsertOutcome {
+        let retry_after = self.first_expires_at.map_or(Duration::ZERO, |expires_at| {
+            let millis = expires_at.saturating_sub(now_millis()).max(0);
+            Duration::from_millis(u64::try_from(millis).unwrap_or(0))
+        });
+        InsertOutcome::ClientLimitReached { retry_after }
+    }
 }
 
 /// Creates an empty in-memory repository of the compiled backend, with no
@@ -335,9 +356,30 @@ mod tests {
             .insert("a3", &message("a3"), TTL, alice())
             .unwrap();
 
-        assert_eq!(outcome, InsertOutcome::ClientLimitReached);
+        assert!(matches!(outcome, InsertOutcome::ClientLimitReached { .. }));
         assert_eq!(repository.get("a3").unwrap(), None);
         assert_eq!(repository.get("a1").unwrap(), unacked("a1"));
+    }
+
+    #[test]
+    fn rejected_client_retries_after_its_first_entry_expires() {
+        let mut repository = repository_with_limit_of_two();
+        repository
+            .insert("short", &message("short"), Duration::from_secs(5), alice())
+            .unwrap();
+        repository
+            .insert("long", &message("long"), TTL, alice())
+            .unwrap();
+
+        let outcome = repository
+            .insert("new", &message("new"), TTL, alice())
+            .unwrap();
+
+        let InsertOutcome::ClientLimitReached { retry_after } = outcome else {
+            panic!("expected the client limit to be reached, got {outcome:?}");
+        };
+        assert!(retry_after <= Duration::from_secs(5));
+        assert!(retry_after > Duration::from_secs(4));
     }
 
     #[test]
@@ -415,10 +457,10 @@ mod tests {
                 .unwrap(),
             stored()
         );
-        assert_eq!(
+        assert!(matches!(
             repository.insert("b2", &message("b2"), TTL, bob()).unwrap(),
-            InsertOutcome::ClientLimitReached
-        );
+            InsertOutcome::ClientLimitReached { .. }
+        ));
     }
 
     #[test]
