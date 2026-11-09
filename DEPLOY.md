@@ -70,6 +70,33 @@ trusts only that address.
 To check which address the relay identifies, start it with `-vv`. Each request
 is then logged with a `client_ip` field.
 
+## Limits per client
+
+A stored message stays until its consumer ACKs it or it expires. If unACKed
+messages fill the store, the relay rejects new messages with `503`. To keep a
+single client from filling the store, the relay limits how many unACKed messages
+each client can have stored, 100 by default. Further `POST` requests from that
+client get `429 Too Many Requests`. Replacing a message the client stored
+itself is still allowed.
+
+- **What counts as one client:** an IPv4 address, or an IPv6 /56 network. ISPs
+  usually give each customer at least a /56, so a limit per IPv6 address would
+  be easy to get around.
+- **Shared addresses:** many users can share one IPv4 address, for example
+  behind carrier-grade NAT. Each user normally has only a few unACKed messages
+  at a time, so the default leaves room for many users per address. Raise
+  `--max-entries-per-client` if your users' clients get `429`. To turn the
+  limit off, set it to `--max-entries` or higher.
+- **What the limit doesn't cover:** clients with many addresses can still fill
+  the store together. The limit raises the cost: with the defaults, filling the
+  store takes 100 addresses or /56 networks. The relay doesn't limit request
+  rates or long-poll requests per client; use the proxy's connection and rate
+  limits for those.
+
+With `--persist-db`, the database stores a keyed hash of each message's client,
+not its IP address. The key is random and isn't saved, so after a restart, the
+messages stored before it count against no client's limit until they expire.
+
 ## Run behind Nginx
 
 Start the relay so it trusts only Nginx on the same host:

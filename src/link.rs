@@ -17,9 +17,10 @@ use axum::{
     middleware::map_response,
     response::Response,
     routing::get,
-    Router,
+    Extension, Router,
 };
 
+use crate::client_ip::ClientIp;
 use crate::endpoint::{wait_for, Id, RelayError};
 use crate::server::AppState;
 use crate::storage::Message;
@@ -52,6 +53,7 @@ async fn get_message(Id(id): Id, State(state): State<AppState>) -> Result<Messag
 async fn post_message(
     Id(id): Id,
     State(state): State<AppState>,
+    Extension(client_ip): Extension<ClientIp>,
     message: Message,
 ) -> Result<(), RelayError> {
     let timeout = state.config.link_timeout;
@@ -59,11 +61,12 @@ async fn post_message(
     // can fetch it after the producer got 408: the expiry time is set while
     // the message is stored, and the producer's timeout starts after that.
     let ttl = timeout;
-    let delivery = state
-        .waiting_list
-        .lock()
-        .await
-        .store_and_subscribe_ack(&id, message, ttl)?;
+    let delivery = state.waiting_list.lock().await.store_and_subscribe_ack(
+        &id,
+        message,
+        ttl,
+        client_ip.network(),
+    )?;
     wait_for(delivery, timeout).await
 }
 
@@ -197,5 +200,21 @@ mod tests {
         assert_eq!(response.status_code(), 503);
         assert_eq!(response.text(), "Server at capacity");
         assert_eq!(server.get("/inbox/occupied").await.text(), "undelivered");
+    }
+
+    #[tokio::test]
+    async fn test_post_over_client_limit_returns_429() {
+        let server = test_server(Config {
+            max_entries_per_client: 1,
+            link_timeout: Duration::from_millis(100),
+            ..Config::default()
+        });
+        let body = Bytes::from_static(b"undelivered");
+        server.post("/inbox/occupied").bytes(body).await;
+
+        let body = Bytes::from_static(b"rejected");
+        let response = server.post("/link/new-channel").bytes(body).await;
+
+        assert_eq!(response.status_code(), 429);
     }
 }

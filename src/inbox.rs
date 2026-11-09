@@ -11,8 +11,9 @@
 //! "Deleted message bodies" in `storage/sqlite.rs`). Do not relay sensitive
 //! one-time credentials unless encryption is applied at the application layer.
 
-use axum::{extract::State, routing::get, Router};
+use axum::{extract::State, routing::get, Extension, Router};
 
+use crate::client_ip::ClientIp;
 use crate::endpoint::{wait_for, Id, RelayError};
 use crate::server::AppState;
 use crate::storage::Message;
@@ -31,10 +32,15 @@ pub(crate) fn routes() -> Router<AppState> {
 async fn post_message(
     Id(id): Id,
     State(state): State<AppState>,
+    Extension(client_ip): Extension<ClientIp>,
     message: Message,
 ) -> Result<(), RelayError> {
     let ttl = state.config.inbox_cache_ttl;
-    state.waiting_list.lock().await.store(&id, message, ttl)?;
+    state
+        .waiting_list
+        .lock()
+        .await
+        .store(&id, message, ttl, client_ip.network())?;
     Ok(())
 }
 
@@ -407,5 +413,73 @@ mod tests {
         assert_eq!(server.get("/inbox/second").await.text(), "accepted");
         // The ACKed entry made room, so its ACK status is gone.
         assert_eq!(server.get("/inbox/first/ack").await.status_code(), 404);
+    }
+
+    // ========== Limit per client ==========
+
+    /// Serves a relay behind a trusted proxy at 127.0.0.1, where each client
+    /// may have one unACKed message stored.
+    fn server_with_limit_of_one() -> axum_test::TestServer {
+        test_server(Config {
+            max_entries_per_client: 1,
+            trusted_proxies: vec!["127.0.0.1/32".parse().unwrap()],
+            ..Config::default()
+        })
+    }
+
+    /// Posts a message to `path` as the client at `client_ip`.
+    async fn post_as(
+        server: &axum_test::TestServer,
+        client_ip: &str,
+        path: &str,
+    ) -> axum_test::TestResponse {
+        server
+            .post(path)
+            .add_header("X-Forwarded-For", client_ip)
+            .bytes(Bytes::from_static(b"message"))
+            .await
+    }
+
+    #[tokio::test]
+    async fn test_post_over_client_limit_returns_429_and_other_clients_still_post() {
+        let server = server_with_limit_of_one();
+        post_as(&server, "198.51.100.1", "/inbox/first").await;
+
+        let rejected = post_as(&server, "198.51.100.1", "/inbox/second").await;
+        let other_client = post_as(&server, "198.51.100.2", "/inbox/third").await;
+
+        assert_eq!(rejected.status_code(), 429);
+        assert_eq!(
+            rejected.text(),
+            "Too many unacknowledged messages from this client"
+        );
+        assert_eq!(other_client.status_code(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_ack_frees_room_under_the_client_limit() {
+        let server = server_with_limit_of_one();
+        post_as(&server, "198.51.100.1", "/inbox/first").await;
+
+        server
+            .delete("/inbox/first")
+            .add_header("X-Forwarded-For", "198.51.100.2")
+            .await
+            .assert_status_ok();
+        let response = post_as(&server, "198.51.100.1", "/inbox/second").await;
+
+        assert_eq!(response.status_code(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_addresses_in_one_56_network_share_the_client_limit() {
+        let server = server_with_limit_of_one();
+        post_as(&server, "2001:db8:0:1::8", "/inbox/first").await;
+
+        let same_56 = post_as(&server, "2001:db8:0:ff::9", "/inbox/second").await;
+        let next_56 = post_as(&server, "2001:db8:0:100::8", "/inbox/third").await;
+
+        assert_eq!(same_56.status_code(), 429);
+        assert_eq!(next_56.status_code(), 200);
     }
 }

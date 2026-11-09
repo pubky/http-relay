@@ -18,18 +18,46 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use ipnet::IpNet;
+use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 
 const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+
+/// Prefix length of the IPv6 network that counts as one client.
+///
+/// ISPs usually delegate a /56 or a /48 to each customer, and the customer can
+/// use every address in it. Grouping by /64 would give one customer up to 65,536
+/// separate limits; grouping by /56 gives them at most 256.
+const IPV6_CLIENT_PREFIX: u8 = 56;
 
 /// The IP address of the client that sent a request.
 ///
 /// [`identify_client`] adds it to every request as an extension, so handlers can
 /// read it with `Extension<ClientIp>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ClientIp(
-    #[allow(dead_code, reason = "read by the planned per-client limits")] pub IpAddr,
-);
+pub(crate) struct ClientIp(pub IpAddr);
+
+impl ClientIp {
+    /// Returns the network that per-client limits count this client under: the
+    /// address itself for IPv4, and its /56 network for IPv6.
+    pub fn network(self) -> ClientNetwork {
+        let network = match self.0 {
+            IpAddr::V4(ip) => IpNet::V4(Ipv4Net::from(ip)),
+            IpAddr::V6(ip) => IpNet::V6(
+                Ipv6Net::new(ip, IPV6_CLIENT_PREFIX)
+                    .expect("56 is a valid IPv6 prefix length")
+                    .trunc(),
+            ),
+        };
+        ClientNetwork(network)
+    }
+}
+
+/// The addresses that per-client limits treat as one client.
+///
+/// One user can control many IPv6 addresses, so a limit per address would be
+/// easy to get around. See [`ClientIp::network`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ClientNetwork(IpNet);
 
 /// The proxy networks whose `X-Forwarded-For` entries the relay trusts.
 ///
@@ -336,6 +364,24 @@ mod tests {
                 r"198.51.100.8\xe9".into()
             ))
         );
+    }
+
+    #[test]
+    fn ipv4_clients_are_separate_networks() {
+        let client = ClientIp(ip("198.51.100.8")).network();
+        let neighbor = ClientIp(ip("198.51.100.9")).network();
+
+        assert_ne!(client, neighbor);
+    }
+
+    #[test]
+    fn ipv6_clients_in_one_56_network_are_one_client() {
+        let client = ClientIp(ip("2001:db8:0:1::8")).network();
+        let same_56 = ClientIp(ip("2001:db8:0:ff:ffff::1")).network();
+        let next_56 = ClientIp(ip("2001:db8:0:100::8")).network();
+
+        assert_eq!(client, same_56);
+        assert_ne!(client, next_56);
     }
 
     /// Serves a router that answers with the client IP that the middleware found.
