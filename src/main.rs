@@ -2,7 +2,7 @@
 
 #[cfg(feature = "persist")]
 use std::path::PathBuf;
-use std::{net::IpAddr, time::Duration};
+use std::{net::IpAddr, num::NonZeroUsize, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
@@ -50,10 +50,10 @@ struct Args {
     /// stored. Further messages get 429
     #[arg(
         long,
-        default_value_t = HttpRelayBuilder::DEFAULT_MAX_ENTRIES_PER_CLIENT,
-        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+        default_value_t = NonZeroUsize::new(HttpRelayBuilder::DEFAULT_MAX_ENTRIES_PER_CLIENT)
+            .expect("the default is not zero")
     )]
-    max_entries_per_client: usize,
+    max_entries_per_client: NonZeroUsize,
 
     /// Path to SQLite database for persistent storage.
     /// If not specified, uses in-memory storage (data lost on restart).
@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
         .inbox_cache_ttl(Duration::from_secs(args.inbox_cache_ttl))
         .max_body_size(args.max_body_size)
         .max_entries(args.max_entries)
-        .max_entries_per_client(args.max_entries_per_client)
+        .max_entries_per_client(args.max_entries_per_client.get())
         .cors_allow_all(args.cors_allow_all)
         .trusted_proxies(args.trusted_proxy);
     #[cfg(feature = "persist")]
