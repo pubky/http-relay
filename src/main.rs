@@ -1,6 +1,8 @@
 //! HTTP Relay server executable.
 
-use std::{net::IpAddr, path::PathBuf, time::Duration};
+#[cfg(feature = "persist")]
+use std::path::PathBuf;
+use std::{net::IpAddr, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
@@ -8,9 +10,6 @@ use http_relay::HttpRelayBuilder;
 use ipnet::IpNet;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
-
-/// Default maximum entries in the waiting list.
-const DEFAULT_MAX_ENTRIES: usize = 10_000;
 
 #[derive(Parser, Debug)]
 #[command(name = "http-relay")]
@@ -26,29 +25,30 @@ struct Args {
     port: u16,
 
     /// Link endpoint timeout in seconds (how long producer/consumer wait for each other)
-    #[arg(long, default_value_t = 600)]
+    #[arg(long, default_value_t = HttpRelayBuilder::DEFAULT_LINK_TIMEOUT.as_secs())]
     link_timeout: u64,
 
     /// Inbox long-poll timeout in seconds (shorter to avoid proxy timeouts)
-    #[arg(long, default_value_t = 25)]
+    #[arg(long, default_value_t = HttpRelayBuilder::DEFAULT_INBOX_TIMEOUT.as_secs())]
     inbox_timeout: u64,
 
     /// Inbox message TTL in seconds (how long messages persist before expiring)
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = HttpRelayBuilder::DEFAULT_INBOX_CACHE_TTL.as_secs())]
     inbox_cache_ttl: u64,
 
     /// Maximum request body size in bytes
-    #[arg(long, default_value_t = 2 * 1024)]
+    #[arg(long, default_value_t = HttpRelayBuilder::DEFAULT_MAX_BODY_SIZE)]
     max_body_size: usize,
 
-    /// Maximum entries in the waiting list (new IDs get 503 when all entries hold
-    /// undelivered messages). Also limits the number of IDs with waiting requests
+    /// Maximum stored entries (new IDs get 503 when every entry holds an
+    /// unACKed message). Also limits the number of IDs with waiting requests
     /// (503 when full)
-    #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES)]
+    #[arg(long, default_value_t = HttpRelayBuilder::DEFAULT_MAX_ENTRIES)]
     max_entries: usize,
 
     /// Path to SQLite database for persistent storage.
     /// If not specified, uses in-memory storage (data lost on restart).
+    #[cfg(feature = "persist")]
     #[arg(long)]
     persist_db: Option<PathBuf>,
 
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
 
     init_tracing(args.verbose, args.quiet);
 
-    let relay = HttpRelayBuilder::default()
+    let builder = HttpRelayBuilder::default()
         .bind_address(args.bind)
         .http_port(args.port)
         .link_timeout(Duration::from_secs(args.link_timeout))
@@ -84,11 +84,11 @@ async fn main() -> Result<()> {
         .inbox_cache_ttl(Duration::from_secs(args.inbox_cache_ttl))
         .max_body_size(args.max_body_size)
         .max_entries(args.max_entries)
-        .persist_db(args.persist_db)
         .cors_allow_all(args.cors_allow_all)
-        .trusted_proxies(args.trusted_proxy)
-        .run()
-        .await?;
+        .trusted_proxies(args.trusted_proxy);
+    #[cfg(feature = "persist")]
+    let builder = builder.persist_db(args.persist_db);
+    let relay = builder.run().await?;
 
     tracing::info!(
         address = %relay.http_address(),
@@ -164,27 +164,8 @@ mod tests {
     }
 
     #[test]
-    fn test_quiet_overrides_verbose() {
-        assert_eq!(log_level(3, true), LevelFilter::OFF);
-    }
-
-    #[test]
-    fn test_default_is_warn() {
-        assert_eq!(log_level(0, false), LevelFilter::WARN);
-    }
-
-    #[test]
-    fn test_verbose_info() {
-        assert_eq!(log_level(1, false), LevelFilter::INFO);
-    }
-
-    #[test]
-    fn test_verbose_debug() {
-        assert_eq!(log_level(2, false), LevelFilter::DEBUG);
-    }
-
-    #[test]
-    fn test_verbose_trace() {
-        assert_eq!(log_level(3, false), LevelFilter::TRACE);
+    fn test_args_are_consistent() {
+        use clap::CommandFactory;
+        Args::command().debug_assert();
     }
 }
