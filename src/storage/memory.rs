@@ -4,11 +4,14 @@ use std::{collections::HashMap, time::Duration};
 
 use anyhow::Result;
 
-use super::{expires_at, now_millis, InsertOutcome, Message, StoredEntry};
+use super::{expires_at, now_millis, Capacity, InsertOutcome, Message, OwnedEntries, StoredEntry};
+use crate::client_ip::ClientNetwork;
 
 struct Entry {
     /// `None` once the entry is ACKed.
     message: Option<Message>,
+    /// The client that stored the message.
+    owner: ClientNetwork,
     expires_at: i64,
     /// Orders entries by when they were stored, to delete the oldest ACKed
     /// entry first when making room.
@@ -24,24 +27,36 @@ impl Entry {
 /// Entries in a `HashMap`.
 pub(crate) struct EntryRepository {
     entries: HashMap<String, Entry>,
-    max_entries: usize,
+    capacity: Capacity,
     next_sequence: u64,
 }
 
 impl EntryRepository {
-    pub fn new(max_entries: usize) -> Self {
+    pub fn new(capacity: Capacity) -> Self {
         Self {
             entries: HashMap::new(),
-            max_entries,
+            capacity,
             next_sequence: 0,
         }
     }
 
-    /// Stores `message` for `id`, replacing any previous entry and its ACK.
+    /// Stores `message` for `id` with `owner` as its owner, replacing any
+    /// previous entry and its ACK.
     ///
-    /// A new ID in a full store first needs room; see the module docs of
-    /// [`super`].
-    pub fn insert(&mut self, id: &str, message: &Message, ttl: Duration) -> Result<InsertOutcome> {
+    /// The owner must be below its limit, and a new ID in a full store first
+    /// needs room; see the module docs of [`super`].
+    pub fn insert(
+        &mut self,
+        id: &str,
+        message: &Message,
+        ttl: Duration,
+        owner: ClientNetwork,
+    ) -> Result<InsertOutcome> {
+        let owned = self.other_unacked_entries(owner, id);
+        if owned.count >= self.capacity.max_entries_per_client {
+            return Ok(owned.limit_reached());
+        }
+
         let mut removed_ids = Vec::new();
         if !self.entries.contains_key(id) {
             match self.make_room() {
@@ -54,6 +69,7 @@ impl EntryRepository {
             id.to_string(),
             Entry {
                 message: Some(message.clone()),
+                owner,
                 expires_at: expires_at(ttl),
                 sequence: self.next_sequence,
             },
@@ -62,11 +78,38 @@ impl EntryRepository {
         Ok(InsertOutcome::Stored { removed_ids })
     }
 
+    /// Finds the live unACKed entries that `owner` stored, except the one for
+    /// `id`, which an insert for `id` replaces.
+    ///
+    /// Scans every entry, so inserts get slower as the store grows: at 10,000
+    /// entries, the relay handles about a third as many as without the scan.
+    /// That's acceptable because this backend serves tests; deployments use
+    /// the `persist` feature, whose SQLite backend has an index on owners.
+    fn other_unacked_entries(&self, owner: ClientNetwork, id: &str) -> OwnedEntries {
+        let now = now_millis();
+        let mut owned = OwnedEntries::default();
+        let others = self.entries.iter().filter(|(entry_id, entry)| {
+            entry.owner == owner
+                && entry.message.is_some()
+                && entry.expires_at > now
+                && entry_id.as_str() != id
+        });
+        for (_, entry) in others {
+            owned.count += 1;
+            owned.first_expires_at = Some(
+                owned
+                    .first_expires_at
+                    .map_or(entry.expires_at, |first| first.min(entry.expires_at)),
+            );
+        }
+        owned
+    }
+
     /// Deletes expired entries, then ACKed ones stored longest ago, until there is room for
     /// one more. Returns their IDs, or `None` without deleting anything if
     /// that isn't enough.
     fn make_room(&mut self) -> Option<Vec<String>> {
-        let excess = (self.entries.len() + 1).saturating_sub(self.max_entries);
+        let excess = (self.entries.len() + 1).saturating_sub(self.capacity.max_entries);
         if excess == 0 {
             return Some(Vec::new());
         }

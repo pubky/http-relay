@@ -9,25 +9,45 @@
 //! SQLite overwrites it, and copies outside SQLite's control (filesystem
 //! blocks, SSD wear leveling, backups) remain possible. Clients that need
 //! confidentiality must encrypt message bodies before sending them.
+//!
+//! # Entry owners
+//!
+//! The `owner` column holds a keyed hash of the owner's client network, not
+//! the network itself, so client IP addresses never reach the disk. The key is
+//! random and lives only in memory. After a restart, the hashes of entries
+//! stored before it match no client, so those entries count against no
+//! client's limit until they expire.
 
-use std::{path::Path, time::Duration};
+use std::{
+    hash::{BuildHasher, RandomState},
+    path::Path,
+    time::Duration,
+};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use rusqlite::{Connection, OptionalExtension};
 
-use super::{expires_at, now_millis, InsertOutcome, Message, StoredEntry};
+use super::{expires_at, now_millis, Capacity, InsertOutcome, Message, OwnedEntries, StoredEntry};
+use crate::client_ip::ClientNetwork;
+
+/// Maximum size of SQLite's page cache, in KiB. SQLite only fills it as
+/// needed. At 100,000 entries, raising it from the default of 2 MB to 64 MB
+/// doubled the insert rate with a database file.
+const CACHE_SIZE_KIB: u32 = 64 * 1024;
 
 /// Entries in a file-based or in-memory SQLite database.
 pub(crate) struct EntryRepository {
     connection: Connection,
-    max_entries: usize,
+    capacity: Capacity,
+    /// Hashes owners for the `owner` column; see "Entry owners" in the module docs.
+    owner_hasher: RandomState,
 }
 
 impl EntryRepository {
     /// Opens the database at `path`, or an in-memory database if `path` is
-    /// `None`, and creates the schema if needed.
-    pub fn open(path: Option<&Path>, max_entries: usize) -> Result<Self> {
+    /// `None`, and creates or upgrades the schema if needed.
+    pub fn open(path: Option<&Path>, capacity: Capacity) -> Result<Self> {
         let connection = match path {
             Some(path) => Connection::open(path).context("Failed to open SQLite database file")?,
             None => {
@@ -39,6 +59,13 @@ impl EntryRepository {
         connection
             .execute_batch("PRAGMA secure_delete=ON;")
             .context("Failed to enable secure delete")?;
+
+        // Per-connection setting. The default cache of 2 MB can't hold the
+        // `owner` index: its keys are random hashes, so each insert writes to a
+        // random page, and with a database file each cache miss reads from disk.
+        connection
+            .execute_batch(&format!("PRAGMA cache_size=-{CACHE_SIZE_KIB};"))
+            .context("Failed to set the cache size")?;
 
         // In-memory databases don't support WAL.
         if path.is_some() {
@@ -58,30 +85,58 @@ impl EntryRepository {
                     -- database files keep working.
                     acked INTEGER DEFAULT 0,
                     expires_at INTEGER NOT NULL,
-                    created_at INTEGER NOT NULL
+                    created_at INTEGER NOT NULL,
+                    owner INTEGER
                 );
                 CREATE INDEX IF NOT EXISTS idx_expires_at ON entries(expires_at);
                 CREATE INDEX IF NOT EXISTS idx_created_at ON entries(created_at);
                 "#,
             )
             .context("Failed to create database schema")?;
+        add_owner_column_if_missing(&connection)?;
 
         Ok(Self {
             connection,
-            max_entries,
+            capacity,
+            owner_hasher: RandomState::new(),
         })
     }
 
-    /// Stores `message` for `id`, replacing any previous entry and its ACK.
+    /// Stores `message` for `id` with `owner` as its owner, replacing any
+    /// previous entry and its ACK.
     ///
-    /// A new ID in a full store first needs room; see the module docs of
-    /// [`super`]. Runs in one transaction: if it fails, no entry was deleted
-    /// to make room.
-    pub fn insert(&mut self, id: &str, message: &Message, ttl: Duration) -> Result<InsertOutcome> {
+    /// The owner must be below its limit, and a new ID in a full store first
+    /// needs room; see the module docs of [`super`]. Runs in one transaction:
+    /// if it fails, no entry was deleted to make room.
+    pub fn insert(
+        &mut self,
+        id: &str,
+        message: &Message,
+        ttl: Duration,
+        owner: ClientNetwork,
+    ) -> Result<InsertOutcome> {
+        // SQLite integers are signed; the cast keeps all 64 bits of the hash.
+        let owner_hash = self.owner_hasher.hash_one(owner) as i64;
         let transaction = self
             .connection
             .transaction()
             .context("Failed to begin insert transaction")?;
+
+        let owned = transaction
+            .query_row(
+                "SELECT COUNT(*), MIN(expires_at) FROM entries WHERE owner = ?1 AND id != ?2 AND acked = 0 AND expires_at > ?3",
+                rusqlite::params![owner_hash, id, now_millis()],
+                |row| {
+                    Ok(OwnedEntries {
+                        count: row.get(0)?,
+                        first_expires_at: row.get(1)?,
+                    })
+                },
+            )
+            .context("Failed to count the owner's entries")?;
+        if owned.count >= self.capacity.max_entries_per_client {
+            return Ok(owned.limit_reached());
+        }
 
         let exists: bool = transaction
             .query_row(
@@ -93,7 +148,7 @@ impl EntryRepository {
         let removed_ids = if exists {
             Vec::new()
         } else {
-            match make_room(&transaction, self.max_entries)? {
+            match make_room(&transaction, self.capacity.max_entries)? {
                 Some(removed_ids) => removed_ids,
                 // Dropping the transaction rolls it back; nothing was changed.
                 None => return Ok(InsertOutcome::StoreFull),
@@ -102,13 +157,14 @@ impl EntryRepository {
 
         transaction
             .execute(
-                "INSERT OR REPLACE INTO entries (id, message_body, content_type, acked, expires_at, created_at) VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+                "INSERT OR REPLACE INTO entries (id, message_body, content_type, acked, expires_at, created_at, owner) VALUES (?1, ?2, ?3, 0, ?4, ?5, ?6)",
                 rusqlite::params![
                     id,
                     message.body.as_ref(),
                     message.content_type,
                     expires_at(ttl),
-                    now_millis()
+                    now_millis(),
+                    owner_hash
                 ],
             )
             .context("Failed to insert entry")?;
@@ -160,6 +216,26 @@ impl EntryRepository {
     pub fn remove_expired(&mut self) -> Result<Vec<String>> {
         delete_expired(&self.connection)
     }
+}
+
+/// Adds the `owner` column to a database file written before entries had
+/// owners, and indexes it. Existing entries get no owner.
+fn add_owner_column_if_missing(connection: &Connection) -> Result<()> {
+    let has_owner: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('entries') WHERE name = 'owner')",
+            [],
+            |row| row.get(0),
+        )
+        .context("Failed to read the database schema")?;
+    if !has_owner {
+        connection
+            .execute_batch("ALTER TABLE entries ADD COLUMN owner INTEGER;")
+            .context("Failed to add the owner column")?;
+    }
+    connection
+        .execute_batch("CREATE INDEX IF NOT EXISTS idx_owner ON entries(owner);")
+        .context("Failed to index the owner column")
 }
 
 /// Deletes expired entries, then ACKed ones stored longest ago, until there is
@@ -223,13 +299,26 @@ fn delete_expired(connection: &Connection) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::test_client;
 
     const TTL: Duration = Duration::from_secs(60);
+
+    /// Holds `max_entries` entries, with no limit per client.
+    fn capacity(max_entries: usize) -> Capacity {
+        Capacity {
+            max_entries,
+            max_entries_per_client: usize::MAX,
+        }
+    }
+
+    fn alice() -> ClientNetwork {
+        test_client("198.51.100.1")
+    }
 
     #[test]
     fn test_secure_delete_is_enabled() {
         // Regression test for https://github.com/pubky/http-relay/issues/18
-        let repository = EntryRepository::open(None, 10).unwrap();
+        let repository = EntryRepository::open(None, capacity(10)).unwrap();
 
         let secure_delete: i64 = repository
             .connection
@@ -237,6 +326,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(secure_delete, 1);
+    }
+
+    #[test]
+    fn cache_size_is_raised() {
+        let repository = EntryRepository::open(None, capacity(10)).unwrap();
+
+        let cache_size: i64 = repository
+            .connection
+            .query_row("PRAGMA cache_size", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(cache_size, -i64::from(CACHE_SIZE_KIB));
     }
 
     fn message() -> Message {
@@ -248,8 +349,10 @@ mod tests {
 
     #[test]
     fn failed_insert_keeps_the_entries_it_would_remove() {
-        let mut repository = EntryRepository::open(None, 1).unwrap();
-        repository.insert("acked", &message(), TTL).unwrap();
+        let mut repository = EntryRepository::open(None, capacity(1)).unwrap();
+        repository
+            .insert("acked", &message(), TTL, alice())
+            .unwrap();
         repository.ack("acked").unwrap();
         // Makes the insert fail after `make_room` deleted "acked".
         repository
@@ -260,7 +363,7 @@ mod tests {
             )
             .unwrap();
 
-        let result = repository.insert("fails", &message(), TTL);
+        let result = repository.insert("fails", &message(), TTL, alice());
 
         assert!(result.is_err());
         assert_eq!(repository.get("acked").unwrap(), Some(StoredEntry::Acked));
@@ -282,11 +385,11 @@ mod tests {
         let path = directory.join("relay.db");
         let message = message();
 
-        EntryRepository::open(Some(&path), 10)
+        EntryRepository::open(Some(&path), capacity(10))
             .unwrap()
-            .insert("id", &message, Duration::from_secs(60))
+            .insert("id", &message, TTL, alice())
             .unwrap();
-        let reopened = EntryRepository::open(Some(&path), 10).unwrap();
+        let reopened = EntryRepository::open(Some(&path), capacity(10)).unwrap();
 
         assert_eq!(
             reopened.get("id").unwrap(),
@@ -299,17 +402,17 @@ mod tests {
     fn insert_over_a_lowered_limit_removes_enough_acked_entries() {
         let directory = temp_directory("lowered-limit");
         let path = directory.join("relay.db");
-        let mut repository = EntryRepository::open(Some(&path), 4).unwrap();
+        let mut repository = EntryRepository::open(Some(&path), capacity(4)).unwrap();
         for id in ["acked1", "acked2", "acked3", "unacked"] {
-            repository.insert(id, &message(), TTL).unwrap();
+            repository.insert(id, &message(), TTL, alice()).unwrap();
         }
         for id in ["acked1", "acked2", "acked3"] {
             repository.ack(id).unwrap();
         }
         drop(repository);
-        let mut reopened = EntryRepository::open(Some(&path), 2).unwrap();
+        let mut reopened = EntryRepository::open(Some(&path), capacity(2)).unwrap();
 
-        let outcome = reopened.insert("new", &message(), TTL).unwrap();
+        let outcome = reopened.insert("new", &message(), TTL, alice()).unwrap();
 
         let InsertOutcome::Stored { mut removed_ids } = outcome else {
             panic!("expected the message to be stored");
@@ -318,6 +421,59 @@ mod tests {
         assert_eq!(removed_ids, ["acked1", "acked2", "acked3"]);
         assert!(reopened.get("unacked").unwrap().is_some());
         assert!(reopened.get("new").unwrap().is_some());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn owner_column_holds_no_client_address() {
+        let mut repository = EntryRepository::open(None, capacity(10)).unwrap();
+
+        repository.insert("id", &message(), TTL, alice()).unwrap();
+
+        let owner_type: String = repository
+            .connection
+            .query_row("SELECT typeof(owner) FROM entries", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(owner_type, "integer");
+    }
+
+    #[test]
+    fn database_file_without_owners_is_upgraded() {
+        let directory = temp_directory("without-owners");
+        let path = directory.join("relay.db");
+        // The schema before entries had owners.
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE entries (
+                    id TEXT PRIMARY KEY,
+                    message_body BLOB,
+                    content_type TEXT,
+                    acked INTEGER DEFAULT 0,
+                    expires_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                INSERT INTO entries (id, message_body, acked, expires_at, created_at)
+                    VALUES ('old', x'00', 0, {}, 0);",
+                expires_at(TTL)
+            ))
+            .unwrap();
+        let limit_of_one = Capacity {
+            max_entries: 10,
+            max_entries_per_client: 1,
+        };
+
+        let mut repository = EntryRepository::open(Some(&path), limit_of_one).unwrap();
+        let outcome = repository.insert("new", &message(), TTL, alice()).unwrap();
+
+        // The old entry counts against no client's limit.
+        assert_eq!(
+            outcome,
+            InsertOutcome::Stored {
+                removed_ids: vec![]
+            }
+        );
+        assert!(repository.get("old").unwrap().is_some());
         std::fs::remove_dir_all(&directory).unwrap();
     }
 }

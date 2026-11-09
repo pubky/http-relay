@@ -122,6 +122,11 @@ pub(crate) enum RelayError {
     NotFound,
     Timeout,
     TooManyWaiters,
+    /// The client already has as many unACKed messages stored as it may. One
+    /// of them expires after `retry_after`.
+    ClientLimitReached {
+        retry_after: Duration,
+    },
     /// Every stored entry holds an unACKed message.
     StoreFull,
     Storage(anyhow::Error),
@@ -137,6 +142,9 @@ impl From<WaitingListError> for RelayError {
     fn from(error: WaitingListError) -> Self {
         match error {
             WaitingListError::WaiterLimitReached => Self::TooManyWaiters,
+            WaitingListError::ClientLimitReached { retry_after } => {
+                Self::ClientLimitReached { retry_after }
+            }
             WaitingListError::StoreFull => Self::StoreFull,
             WaitingListError::Storage(error) => Self::Storage(error),
         }
@@ -153,6 +161,16 @@ impl IntoResponse for RelayError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Too many concurrent requests",
             ),
+            Self::ClientLimitReached { retry_after } => {
+                // Rounded up, so clients that wait this long find room.
+                let seconds = retry_after.as_millis().div_ceil(1000).max(1);
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(header::RETRY_AFTER, seconds.to_string())],
+                    "Too many unacknowledged messages from this client",
+                )
+                    .into_response();
+            }
             Self::StoreFull => (StatusCode::SERVICE_UNAVAILABLE, "Server at capacity"),
             Self::Storage(error) => {
                 tracing::error!(?error, "Storage failed");

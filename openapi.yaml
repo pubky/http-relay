@@ -27,8 +27,9 @@ info:
     ## Errors
 
     Error responses have a short `text/plain` body: `ID too long` (400),
-    `Not found` (404), `Request timed out` (408), `Too many concurrent
-    requests` (503), `Server at capacity` (503) or `Storage error` (500).
+    `Not found` (404), `Request timed out` (408), `Too many unacknowledged
+    messages from this client` (429), `Too many concurrent requests` (503),
+    `Server at capacity` (503) or `Storage error` (500).
   version: 0.6.0
   license:
     name: MIT
@@ -61,6 +62,8 @@ paths:
           description: Message stored successfully
         '400':
           $ref: '#/components/responses/IdTooLong'
+        '429':
+          $ref: '#/components/responses/ClientLimitReached'
         '500':
           $ref: '#/components/responses/StorageError'
         '503':
@@ -235,6 +238,8 @@ paths:
           $ref: '#/components/responses/IdTooLong'
         '408':
           $ref: '#/components/responses/Timeout'
+        '429':
+          $ref: '#/components/responses/ClientLimitReached'
         '500':
           $ref: '#/components/responses/StorageError'
         '503':
@@ -390,6 +395,28 @@ components:
           schema:
             type: string
           example: Too many concurrent requests
+
+    ClientLimitReached:
+      description: |
+        This client already has the maximum number of unacknowledged messages
+        stored (`--max-entries-per-client`, 100 by default). A client is an
+        IPv4 address or an IPv6 /56 network. The new message is not stored.
+        Replacing one of the client's unacknowledged messages is still
+        allowed. Retry
+        after one of the client's messages is acknowledged or expires.
+      headers:
+        Retry-After:
+          description: |
+            Seconds until the client's first unacknowledged message expires,
+            rounded up. An acknowledgement can make room sooner.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Too many unacknowledged messages from this client
 
     ServerAtCapacity:
       description: |

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::oneshot;
 
+use crate::client_ip::ClientNetwork;
 use crate::storage::{EntryRepository, InsertOutcome, Message, StoredEntry};
 
 /// Bounds concurrent long-poll connections per ID and waiter kind (ACK or message).
@@ -40,6 +41,11 @@ pub(crate) enum Delivery<T> {
 pub(crate) enum WaitingListError {
     /// Maximum waiters for this ID, or maximum number of waiting IDs, reached.
     WaiterLimitReached,
+    /// The client already has as many unACKed messages stored as it may.
+    /// Nothing was stored. One of its messages expires after `retry_after`.
+    ClientLimitReached {
+        retry_after: Duration,
+    },
     /// The store has no room for a new ID. Nothing was stored.
     StoreFull,
     Storage(anyhow::Error),
@@ -154,18 +160,20 @@ impl WaitingList {
         }
     }
 
-    /// Stores a message and hands it to the requests waiting for one.
+    /// Stores a message from `producer` and hands it to the requests waiting
+    /// for one.
     ///
     /// Requests waiting for the ACK of the replaced message are dropped. If
-    /// the store is full, nothing changes and the waiting requests keep
-    /// waiting.
+    /// the message can't be stored, nothing changes and the waiting requests
+    /// keep waiting.
     pub fn store(
         &mut self,
         id: &str,
         message: Message,
         ttl: Duration,
+        producer: ClientNetwork,
     ) -> Result<(), WaitingListError> {
-        self.deliver(id, message, ttl)?;
+        self.deliver(id, message, ttl, producer)?;
         Ok(())
     }
 
@@ -180,9 +188,10 @@ impl WaitingList {
         id: &str,
         message: Message,
         ttl: Duration,
+        producer: ClientNetwork,
     ) -> Result<Delivery<()>, WaitingListError> {
         self.ensure_waiter_capacity(id)?;
-        let acked = self.deliver(id, message, ttl)?;
+        let acked = self.deliver(id, message, ttl, producer)?;
         if acked {
             return Ok(Delivery::Ready(()));
         }
@@ -257,14 +266,18 @@ impl WaitingList {
         id: &str,
         message: Message,
         ttl: Duration,
+        producer: ClientNetwork,
     ) -> Result<bool, WaitingListError> {
-        match self.repository.insert(id, &message, ttl)? {
+        match self.repository.insert(id, &message, ttl, producer)? {
             InsertOutcome::Stored { removed_ids } => {
                 // Entries removed to make room are expired or ACKed. ACK
                 // waiters of an expired entry would otherwise wait in vain.
                 for removed_id in &removed_ids {
                     self.take_ack_waiters(removed_id);
                 }
+            }
+            InsertOutcome::ClientLimitReached { retry_after } => {
+                return Err(WaitingListError::ClientLimitReached { retry_after })
             }
             InsertOutcome::StoreFull => return Err(WaitingListError::StoreFull),
         }
@@ -381,9 +394,13 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::storage::test_repository;
+    use crate::storage::{test_client, test_repository};
 
     const TTL: Duration = Duration::from_secs(60);
+
+    fn alice() -> ClientNetwork {
+        test_client("198.51.100.1")
+    }
 
     fn list(max_ids: usize) -> WaitingList {
         WaitingList::new(test_repository(100), max_ids)
@@ -428,7 +445,7 @@ mod tests {
     #[test]
     fn stored_message_is_returned_at_once() {
         let mut list = list(10);
-        list.store("id", message("hello"), TTL).unwrap();
+        list.store("id", message("hello"), TTL, alice()).unwrap();
 
         let delivery = list.get_or_subscribe("id").unwrap();
 
@@ -440,7 +457,7 @@ mod tests {
         let mut list = list(10);
         let receiver = pending(list.get_or_subscribe("id").unwrap());
 
-        list.store("id", message("hello"), TTL).unwrap();
+        list.store("id", message("hello"), TTL, alice()).unwrap();
 
         assert_eq!(receiver.await.unwrap(), message("hello"));
     }
@@ -448,7 +465,7 @@ mod tests {
     #[test]
     fn acked_message_is_not_returned_again() {
         let mut list = list(10);
-        list.store("id", message("hello"), TTL).unwrap();
+        list.store("id", message("hello"), TTL, alice()).unwrap();
         list.ack("id").unwrap();
 
         assert!(matches!(
@@ -465,7 +482,7 @@ mod tests {
         assert_eq!(list.is_acked("id").unwrap(), None);
         assert!(!list.ack("id").unwrap());
 
-        list.store("id", message("hello"), TTL).unwrap();
+        list.store("id", message("hello"), TTL, alice()).unwrap();
         assert_eq!(list.is_acked("id").unwrap(), Some(false));
 
         assert!(list.ack("id").unwrap());
@@ -475,7 +492,7 @@ mod tests {
     #[tokio::test]
     async fn ack_notifies_ack_waiters() {
         let mut list = list(10);
-        list.store("id", message("hello"), TTL).unwrap();
+        list.store("id", message("hello"), TTL, alice()).unwrap();
         let receiver = pending(list.subscribe_ack("id").unwrap().unwrap());
 
         list.ack("id").unwrap();
@@ -488,7 +505,7 @@ mod tests {
         let mut list = list(10);
         assert!(list.subscribe_ack("id").unwrap().is_none());
 
-        list.store("id", message("hello"), TTL).unwrap();
+        list.store("id", message("hello"), TTL, alice()).unwrap();
         list.ack("id").unwrap();
 
         ready(list.subscribe_ack("id").unwrap().unwrap());
@@ -497,10 +514,10 @@ mod tests {
     #[tokio::test]
     async fn new_message_drops_ack_waiters_of_the_replaced_one() {
         let mut list = list(10);
-        list.store("id", message("first"), TTL).unwrap();
+        list.store("id", message("first"), TTL, alice()).unwrap();
         let receiver = pending(list.subscribe_ack("id").unwrap().unwrap());
 
-        list.store("id", message("second"), TTL).unwrap();
+        list.store("id", message("second"), TTL, alice()).unwrap();
 
         assert!(is_closed(receiver));
     }
@@ -510,10 +527,11 @@ mod tests {
     #[tokio::test]
     async fn full_store_rejects_message_and_keeps_waiters_waiting() {
         let mut list = WaitingList::new(test_repository(1), 10);
-        list.store("unacked", message("first"), TTL).unwrap();
+        list.store("unacked", message("first"), TTL, alice())
+            .unwrap();
         let mut receiver = pending(list.get_or_subscribe("waiting").unwrap());
 
-        let result = list.store("waiting", message("second"), TTL);
+        let result = list.store("waiting", message("second"), TTL, alice());
 
         assert!(matches!(result, Err(WaitingListError::StoreFull)));
         assert!(matches!(
@@ -527,12 +545,17 @@ mod tests {
         // Regression test: ACK waiters of an entry deleted to make room waited
         // until their timeout instead of failing at once.
         let mut list = WaitingList::new(test_repository(1), 10);
-        list.store("expires", message("hello"), Duration::from_millis(100))
-            .unwrap();
+        list.store(
+            "expires",
+            message("hello"),
+            Duration::from_millis(100),
+            alice(),
+        )
+        .unwrap();
         let receiver = pending(list.subscribe_ack("expires").unwrap().unwrap());
         tokio::time::sleep(Duration::from_millis(150)).await;
 
-        list.store("new", message("hello"), TTL).unwrap();
+        list.store("new", message("hello"), TTL, alice()).unwrap();
 
         assert!(is_closed(receiver));
     }
@@ -543,7 +566,7 @@ mod tests {
     #[test]
     fn take_acks_a_stored_message() {
         let mut list = list(10);
-        list.store("id", message("hello"), TTL).unwrap();
+        list.store("id", message("hello"), TTL, alice()).unwrap();
 
         assert_eq!(
             ready(list.take_or_subscribe("id").unwrap()),
@@ -559,7 +582,7 @@ mod tests {
         let consumer = pending(list.take_or_subscribe("id").unwrap());
 
         let producer = list
-            .store_and_subscribe_ack("id", message("hello"), TTL)
+            .store_and_subscribe_ack("id", message("hello"), TTL, alice())
             .unwrap();
 
         ready(producer);
@@ -573,11 +596,11 @@ mod tests {
         // could ACK a message stored in between.
         let mut list = list(10);
         let consumer = pending(list.take_or_subscribe("id").unwrap());
-        list.store("id", message("first"), TTL).unwrap();
+        list.store("id", message("first"), TTL, alice()).unwrap();
         assert_eq!(consumer.await.unwrap(), message("first"));
 
         let producer = list
-            .store_and_subscribe_ack("id", message("second"), TTL)
+            .store_and_subscribe_ack("id", message("second"), TTL, alice())
             .unwrap();
 
         pending(producer);
@@ -590,7 +613,7 @@ mod tests {
         let consumer = pending(list.get_or_subscribe("id").unwrap());
 
         let producer = list
-            .store_and_subscribe_ack("id", message("hello"), TTL)
+            .store_and_subscribe_ack("id", message("hello"), TTL, alice())
             .unwrap();
 
         pending(producer);
@@ -605,7 +628,7 @@ mod tests {
         let mut list = list(1);
         let _waiting = list.get_or_subscribe("occupied").unwrap();
 
-        let result = list.store_and_subscribe_ack("new", message("rejected"), TTL);
+        let result = list.store_and_subscribe_ack("new", message("rejected"), TTL, alice());
 
         assert!(is_limit(result));
         assert_eq!(list.is_acked("new").unwrap(), None);
@@ -617,7 +640,7 @@ mod tests {
         let mut list = list(1);
         let consumer = pending(list.get_or_subscribe("id").unwrap());
 
-        let result = list.store_and_subscribe_ack("id", message("hello"), TTL);
+        let result = list.store_and_subscribe_ack("id", message("hello"), TTL, alice());
 
         assert!(result.is_ok());
         assert_eq!(consumer.await.unwrap(), message("hello"));
@@ -627,12 +650,12 @@ mod tests {
     #[test]
     fn store_and_subscribe_ack_replaces_ack_waiters_at_per_id_limit() {
         let mut list = list(10);
-        list.store("id", message("first"), TTL).unwrap();
+        list.store("id", message("first"), TTL, alice()).unwrap();
         let receivers: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
             .map(|_| pending(list.subscribe_ack("id").unwrap().unwrap()))
             .collect();
 
-        let result = list.store_and_subscribe_ack("id", message("second"), TTL);
+        let result = list.store_and_subscribe_ack("id", message("second"), TTL, alice());
 
         assert!(result.is_ok());
         for receiver in receivers {
@@ -644,9 +667,10 @@ mod tests {
     #[test]
     fn store_and_subscribe_ack_in_full_store_does_not_wait() {
         let mut list = WaitingList::new(test_repository(1), 1);
-        list.store("unacked", message("first"), TTL).unwrap();
+        list.store("unacked", message("first"), TTL, alice())
+            .unwrap();
 
-        let result = list.store_and_subscribe_ack("new", message("rejected"), TTL);
+        let result = list.store_and_subscribe_ack("new", message("rejected"), TTL, alice());
 
         assert!(matches!(result, Err(WaitingListError::StoreFull)));
         // The rejected producer holds no waiting-ID slot.
@@ -668,7 +692,7 @@ mod tests {
     #[test]
     fn ack_waiters_per_id_are_limited() {
         let mut list = list(10);
-        list.store("id", message("hello"), TTL).unwrap();
+        list.store("id", message("hello"), TTL, alice()).unwrap();
         let _receivers: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
             .map(|_| list.subscribe_ack("id").unwrap())
             .collect();
@@ -681,7 +705,7 @@ mod tests {
         // Regression test: a reconnecting consumer must not be blocked by its own
         // disconnected requests until the next cleanup.
         let mut list = list(10);
-        list.store("acked", message("hello"), TTL).unwrap();
+        list.store("acked", message("hello"), TTL, alice()).unwrap();
         for _ in 0..MAX_WAITERS_PER_ENTRY {
             drop(list.get_or_subscribe("waiting").unwrap());
             drop(list.subscribe_ack("acked").unwrap());
@@ -740,7 +764,7 @@ mod tests {
         let receiver = pending(list.get_or_subscribe("id").unwrap());
 
         list.remove_expired().unwrap();
-        list.store("id", message("delayed"), TTL).unwrap();
+        list.store("id", message("delayed"), TTL, alice()).unwrap();
 
         assert_eq!(receiver.await.unwrap(), message("delayed"));
     }
@@ -748,9 +772,14 @@ mod tests {
     #[tokio::test]
     async fn remove_expired_drops_ack_waiters_of_expired_entries() {
         let mut list = list(10);
-        list.store("expires", message("hello"), Duration::from_millis(200))
-            .unwrap();
-        list.store("stays", message("hello"), TTL).unwrap();
+        list.store(
+            "expires",
+            message("hello"),
+            Duration::from_millis(200),
+            alice(),
+        )
+        .unwrap();
+        list.store("stays", message("hello"), TTL, alice()).unwrap();
         let expiring = pending(list.subscribe_ack("expires").unwrap().unwrap());
         let staying = pending(list.subscribe_ack("stays").unwrap().unwrap());
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -767,14 +796,14 @@ mod tests {
         // Regression test: a consumer waiting after an ACK got 404 when the
         // ACKed entry expired, instead of the next message.
         let mut list = list(10);
-        list.store("id", message("first"), Duration::from_millis(200))
+        list.store("id", message("first"), Duration::from_millis(200), alice())
             .unwrap();
         list.ack("id").unwrap();
         let receiver = pending(list.get_or_subscribe("id").unwrap());
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         assert_eq!(list.remove_expired().unwrap(), 1);
-        list.store("id", message("second"), TTL).unwrap();
+        list.store("id", message("second"), TTL, alice()).unwrap();
 
         assert_eq!(receiver.await.unwrap(), message("second"));
     }

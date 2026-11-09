@@ -80,6 +80,7 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--link-timeout <SECS>` | Link endpoint timeout | `600` |
 | `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
 | `--max-entries <N>` | Max stored entries, and max IDs with waiting requests. When the store is full, expired and ACKed entries make room; if there are none, `POST` to a new ID returns `503` | `10000` |
+| `--max-entries-per-client <N>` | Max unACKed messages one client can have stored; further `POST`s return `429`. A client is an IPv4 address or an IPv6 /56 network | `100` |
 | `--persist-db <PATH>` | SQLite database path for persistence (`persist` feature) | (in-memory) |
 | `--cors-allow-all` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) | off |
 | `--trusted-proxy <CIDR>` | Identify clients behind this proxy by `X-Forwarded-For`. Repeatable. See [DEPLOY.md](DEPLOY.md) | off (TCP peer) |
@@ -148,6 +149,10 @@ curl -X POST http://localhost:8080/inbox/my-channel \
 
 **Responses:**
 - `200 OK` - Message stored successfully
+- `429 Too Many Requests` - This client already has the maximum number of
+  unACKed messages stored (`--max-entries-per-client`). Replacing one of them
+  is still allowed. Retry after one is ACKed or expires; the `Retry-After`
+  header gives the seconds until the first one expires.
 - `503 Service Unavailable` - Server at capacity: every stored entry still holds
   an undelivered message. Existing messages are kept; retry later.
 

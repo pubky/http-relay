@@ -4,8 +4,9 @@
 //!
 //! Production deployments require a reverse proxy that parses HTTP. The proxy
 //! terminates TLS, times out slow clients, and limits connections per client IP.
-//! The relay itself has no authentication, no per-client limits, and no
-//! protection against clients that send requests slowly. See `DEPLOY.md`.
+//! The relay itself has no authentication, no request rate limits, and no
+//! protection against clients that send requests slowly. Its only limit per
+//! client is on stored unACKed messages. See `DEPLOY.md`.
 //!
 //! # CORS Configuration
 //!
@@ -37,7 +38,7 @@ use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use url::Url;
 
 use crate::client_ip::{identify_client, TrustedProxies};
-use crate::storage::EntryRepository;
+use crate::storage::{Capacity, EntryRepository};
 use crate::waiting_list::WaitingList;
 
 /// How often expired entries are deleted. Balances memory reclamation against
@@ -64,6 +65,8 @@ pub(crate) struct Config {
     pub max_body_size: usize,
     /// Maximum stored entries, and maximum IDs with waiting requests.
     pub max_entries: usize,
+    /// Maximum live unACKed entries stored by one client.
+    pub max_entries_per_client: usize,
     /// Path to SQLite database for persistent storage.
     /// If None, uses in-memory storage (data lost on restart).
     #[cfg(feature = "persist")]
@@ -85,6 +88,7 @@ impl Default for Config {
             inbox_cache_ttl: HttpRelayBuilder::DEFAULT_INBOX_CACHE_TTL,
             max_body_size: HttpRelayBuilder::DEFAULT_MAX_BODY_SIZE,
             max_entries: HttpRelayBuilder::DEFAULT_MAX_ENTRIES,
+            max_entries_per_client: HttpRelayBuilder::DEFAULT_MAX_ENTRIES_PER_CLIENT,
             #[cfg(feature = "persist")]
             persist_db: None,
             cors_allow_all: false,
@@ -95,6 +99,10 @@ impl Default for Config {
 
 impl Config {
     fn open_storage(&self) -> Result<EntryRepository> {
+        let capacity = Capacity {
+            max_entries: self.max_entries,
+            max_entries_per_client: self.max_entries_per_client,
+        };
         #[cfg(feature = "persist")]
         {
             match &self.persist_db {
@@ -103,12 +111,12 @@ impl Config {
                 }
                 None => tracing::debug!("Using in-memory storage (no persistence)"),
             }
-            EntryRepository::open(self.persist_db.as_deref(), self.max_entries)
+            EntryRepository::open(self.persist_db.as_deref(), capacity)
         }
         #[cfg(not(feature = "persist"))]
         {
             tracing::debug!("Using in-memory storage (no persistence)");
-            Ok(EntryRepository::new(self.max_entries))
+            Ok(EntryRepository::new(capacity))
         }
     }
 }
@@ -128,6 +136,8 @@ impl HttpRelayBuilder {
     pub const DEFAULT_MAX_BODY_SIZE: usize = 2 * 1024;
     /// Default for [`Self::max_entries`].
     pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
+    /// Default for [`Self::max_entries_per_client`].
+    pub const DEFAULT_MAX_ENTRIES_PER_CLIENT: usize = 100;
 
     /// Configure the address to bind to (default: 127.0.0.1).
     pub fn bind_address(mut self, addr: IpAddr) -> Self {
@@ -176,6 +186,20 @@ impl HttpRelayBuilder {
     /// IDs beyond it get `503 Service Unavailable`.
     pub fn max_entries(mut self, max: usize) -> Self {
         self.0.max_entries = max;
+        self
+    }
+
+    /// Configure the maximum unACKed messages one client can have stored
+    /// (default: 100). `POST` of a further message gets `429 Too Many
+    /// Requests`, until one of the client's messages is ACKed or expires.
+    /// Replacing one of the client's unACKed messages is always allowed.
+    ///
+    /// A client is an IPv4 address or an IPv6 /56 network; see
+    /// [`Self::trusted_proxies`] for how the relay finds it. To turn the limit
+    /// off, set it higher than [`Self::max_entries`]. Must be at least 1;
+    /// otherwise [`Self::run`] fails.
+    pub fn max_entries_per_client(mut self, max: usize) -> Self {
+        self.0.max_entries_per_client = max;
         self
     }
 
@@ -294,6 +318,11 @@ pub struct HttpRelay {
 
 impl HttpRelay {
     async fn start(config: Config) -> Result<Self> {
+        // A limit of 0 would reject every POST.
+        anyhow::ensure!(
+            config.max_entries_per_client > 0,
+            "max_entries_per_client must be at least 1"
+        );
         if !config.trusted_proxies.is_empty() {
             tracing::info!(
                 trusted = ?config.trusted_proxies,
@@ -375,6 +404,17 @@ impl Drop for HttpRelay {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_run_rejects_a_client_limit_of_zero() {
+        let result = HttpRelayBuilder::default()
+            .http_port(0)
+            .max_entries_per_client(0)
+            .run()
+            .await;
+
+        assert!(result.is_err());
+    }
 
     #[tokio::test]
     async fn test_root_returns_http_relay() {
