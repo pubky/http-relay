@@ -45,6 +45,15 @@ Or add as a dependency:
 http-relay = "0.6"
 ```
 
+**Cargo features** (all on by default):
+
+- `persist`: SQLite persistence (`--persist-db`). Without it, entries live in
+  memory only and the flag doesn't exist.
+- `link-compat`: the deprecated `/link/{id}` endpoints.
+- `cli`: the `http-relay` binary.
+
+The `server` feature has no effect; the server is always built.
+
 ## Usage
 
 ### As CLI
@@ -71,7 +80,7 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--link-timeout <SECS>` | Link endpoint timeout | `600` |
 | `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
 | `--max-entries <N>` | Max stored entries, and max IDs with waiting requests. When the store is full, expired and ACKed entries make room; if there are none, `POST` to a new ID returns `503` | `10000` |
-| `--persist-db <PATH>` | SQLite database path for persistence | (in-memory) |
+| `--persist-db <PATH>` | SQLite database path for persistence (`persist` feature) | (in-memory) |
 | `--cors-allow-all` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) | off |
 | `--trusted-proxy <CIDR>` | Identify clients behind this proxy by `X-Forwarded-For`. Repeatable. See [DEPLOY.md](DEPLOY.md) | off (TCP peer) |
 | `-v` | Verbosity (repeat for more) | warn |
@@ -154,6 +163,8 @@ curl http://localhost:8080/inbox/my-channel
 **Responses:**
 - `200 OK` - Returns message with original Content-Type
 - `408 Request Timeout` - No message arrived within timeout (25s default)
+- `503 Service Unavailable` - Too many requests already wait for this ID, or
+  too many IDs have waiting requests
 
 #### DELETE `/inbox/{id}` - Acknowledge Delivery
 
@@ -165,6 +176,7 @@ curl -X DELETE http://localhost:8080/inbox/my-channel
 
 **Responses:**
 - `200 OK` - Message acknowledged and cleared
+- `404 Not Found` - No message exists (not posted yet, or expired)
 
 #### GET `/inbox/{id}/ack` - Check ACK Status
 
@@ -190,7 +202,14 @@ curl http://localhost:8080/inbox/my-channel/await
 
 **Responses:**
 - `200 OK` - Consumer ACKed the message
+- `404 Not Found` - No message exists, or it expired or was replaced while waiting
 - `408 Request Timeout` - No ACK received within timeout (default 25s)
+- `503 Service Unavailable` - Too many requests already wait for this ACK
+
+All endpoints answer `400 Bad Request` with `ID too long` if the ID is longer
+than 256 bytes, and `500 Internal Server Error` with `Storage error` if the
+relay can't read or write its storage. Error bodies are short `text/plain`
+messages.
 
 ### Typical Flow
 

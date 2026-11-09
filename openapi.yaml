@@ -23,6 +23,12 @@ info:
 
     This pattern is mobile-friendly: if the app is backgrounded or killed, the
     message remains available for retry, and the producer can detect timeouts.
+
+    ## Errors
+
+    Error responses have a short `text/plain` body: `ID too long` (400),
+    `Not found` (404), `Request timed out` (408), `Too many concurrent
+    requests` (503), `Server at capacity` (503) or `Storage error` (500).
   version: 0.6.0
   license:
     name: MIT
@@ -53,6 +59,10 @@ paths:
       responses:
         '200':
           description: Message stored successfully
+        '400':
+          $ref: '#/components/responses/IdTooLong'
+        '500':
+          $ref: '#/components/responses/StorageError'
         '503':
           $ref: '#/components/responses/ServerAtCapacity'
 
@@ -78,8 +88,14 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/InboxMessage'
+        '400':
+          $ref: '#/components/responses/IdTooLong'
         '408':
           description: No message arrived within timeout (25s default)
+        '500':
+          $ref: '#/components/responses/StorageError'
+        '503':
+          $ref: '#/components/responses/TooManyWaiters'
 
     delete:
       summary: Acknowledge a message
@@ -96,8 +112,12 @@ paths:
       responses:
         '200':
           description: Message acknowledged and removed
+        '400':
+          $ref: '#/components/responses/IdTooLong'
         '404':
-          description: No message to acknowledge
+          description: No message to acknowledge (not posted yet, or expired)
+        '500':
+          $ref: '#/components/responses/StorageError'
 
   /inbox/{id}/ack:
     get:
@@ -128,8 +148,12 @@ paths:
                   - 'true'
                   - 'false'
               example: 'false'
+        '400':
+          $ref: '#/components/responses/IdTooLong'
         '404':
           description: No message exists for this ID
+        '500':
+          $ref: '#/components/responses/StorageError'
 
   /inbox/{id}/await:
     get:
@@ -140,7 +164,8 @@ paths:
         The producer calls this after POST to wait for the consumer's DELETE.
         Default timeout is 25 seconds (compatible with proxy timeouts).
 
-        Returns 200 when acknowledged, 408 on timeout.
+        Returns 200 when acknowledged, 408 on timeout, and 404 if no message
+        exists, or if it expires or a new message replaces it while waiting.
       operationId: inboxAwait
       tags:
         - inbox
@@ -149,8 +174,16 @@ paths:
       responses:
         '200':
           description: Message was acknowledged
+        '400':
+          $ref: '#/components/responses/IdTooLong'
+        '404':
+          description: No message exists, or it expired or was replaced while waiting
         '408':
           description: Timeout waiting for acknowledgment (default 25s)
+        '500':
+          $ref: '#/components/responses/StorageError'
+        '503':
+          $ref: '#/components/responses/TooManyWaiters'
 
   /link/{id}:
     get:
@@ -169,8 +202,14 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/MessageReceived'
+        '400':
+          $ref: '#/components/responses/IdTooLong'
         '408':
           $ref: '#/components/responses/Timeout'
+        '500':
+          $ref: '#/components/responses/StorageError'
+        '503':
+          $ref: '#/components/responses/TooManyWaiters'
 
     post:
       summary: Produce a message (deprecated)
@@ -190,10 +229,25 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/MessageDelivered'
+        '404':
+          description: Another producer replaced the message before a consumer received it
+        '400':
+          $ref: '#/components/responses/IdTooLong'
         '408':
           $ref: '#/components/responses/Timeout'
+        '500':
+          $ref: '#/components/responses/StorageError'
         '503':
-          $ref: '#/components/responses/ServerAtCapacity'
+          description: |
+            Server at capacity (see `ServerAtCapacity`), or too many requests
+            already wait for this ID (see `TooManyWaiters`).
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - Server at capacity
+                  - Too many concurrent requests
 
 components:
   parameters:
@@ -214,10 +268,11 @@ components:
       in: path
       required: true
       description: |
-        Unique channel identifier. Producers and consumers using the same
-        ID are paired.
+        Unique channel identifier (max 256 bytes). Producers and consumers
+        using the same ID are paired.
       schema:
         type: string
+        maxLength: 256
       example: my-channel
 
   requestBodies:
@@ -312,6 +367,29 @@ components:
 
     Timeout:
       description: Timeout waiting for counterpart (producer or consumer)
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Request timed out
+
+    IdTooLong:
+      description: The ID is longer than 256 bytes
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: ID too long
+
+    TooManyWaiters:
+      description: |
+        Too many requests already wait for this ID, or too many IDs have
+        waiting requests.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Too many concurrent requests
 
     ServerAtCapacity:
       description: |
@@ -323,6 +401,14 @@ components:
           schema:
             type: string
           example: Server at capacity
+
+    StorageError:
+      description: The relay failed to read or write its storage
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Storage error
 
 tags:
   - name: inbox
