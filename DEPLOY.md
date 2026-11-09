@@ -76,8 +76,8 @@ A stored message stays until its consumer ACKs it or it expires. If unACKed
 messages fill the store, the relay rejects new messages with `503`. To keep a
 single client from filling the store, the relay limits how many unACKed messages
 each client can have stored, 100 by default. Further `POST` requests from that
-client get `429 Too Many Requests`. Replacing a message the client stored
-itself is still allowed.
+client get `429 Too Many Requests`. Replacing one of the client's unACKed
+messages is still allowed.
 
 - **What counts as one client:** an IPv4 address, or an IPv6 /56 network. ISPs
   usually give each customer at least a /56, so a limit per IPv6 address would

@@ -401,7 +401,8 @@ components:
         This client already has the maximum number of unacknowledged messages
         stored (`--max-entries-per-client`, 100 by default). A client is an
         IPv4 address or an IPv6 /56 network. The new message is not stored.
-        Replacing a message the client stored itself is still allowed. Retry
+        Replacing one of the client's unacknowledged messages is still
+        allowed. Retry
         after one of the client's messages is acknowledged or expires.
       headers:
         Retry-After:

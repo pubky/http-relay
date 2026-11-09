@@ -14,8 +14,8 @@
 //! and keep everyone else out. So each entry records its owner, the client
 //! network that stored its message, and a client may own at most
 //! `max_entries_per_client` live unACKed entries. Storing a message for an ID
-//! makes the storing client its owner. Replacing an entry the client already
-//! owns doesn't count against its limit.
+//! makes the storing client its owner. Replacing one of the client's unACKed
+//! entries doesn't add to its count; replacing an ACKed one does.
 //!
 //! The `persist` feature selects the SQLite backend; without it, entries live
 //! in a `HashMap` and are lost on restart. Both backends have the same
@@ -413,6 +413,28 @@ mod tests {
 
         assert_eq!(outcome, stored());
         assert_eq!(repository.get("a1").unwrap(), unacked("updated"));
+    }
+
+    #[test]
+    fn client_at_its_limit_cannot_replace_its_acked_entry() {
+        let mut repository = repository_with_limit_of_two();
+        repository
+            .insert("acked", &message("acked"), TTL, alice())
+            .unwrap();
+        repository.ack("acked").unwrap();
+        repository
+            .insert("a1", &message("a1"), TTL, alice())
+            .unwrap();
+        repository
+            .insert("a2", &message("a2"), TTL, alice())
+            .unwrap();
+
+        let outcome = repository
+            .insert("acked", &message("new"), TTL, alice())
+            .unwrap();
+
+        assert!(matches!(outcome, InsertOutcome::ClientLimitReached { .. }));
+        assert_eq!(repository.get("acked").unwrap(), Some(StoredEntry::Acked));
     }
 
     #[test]

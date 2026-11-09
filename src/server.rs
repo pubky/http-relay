@@ -192,7 +192,7 @@ impl HttpRelayBuilder {
     /// Configure the maximum unACKed messages one client can have stored
     /// (default: 100). `POST` of a further message gets `429 Too Many
     /// Requests`, until one of the client's messages is ACKed or expires.
-    /// Replacing a message the client stored itself is always allowed.
+    /// Replacing one of the client's unACKed messages is always allowed.
     ///
     /// A client is an IPv4 address or an IPv6 /56 network; see
     /// [`Self::trusted_proxies`] for how the relay finds it. To turn the limit
