@@ -63,7 +63,7 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '429':
-          $ref: '#/components/responses/ClientLimitReached'
+          $ref: '#/components/responses/ClientMessageLimitReached'
         '500':
           $ref: '#/components/responses/StorageError'
         '503':
@@ -96,7 +96,7 @@ paths:
         '408':
           description: No message arrived within timeout (25s default)
         '429':
-          $ref: '#/components/responses/ClientWaitLimitReached'
+          $ref: '#/components/responses/ClientWaitingLimitReached'
         '500':
           $ref: '#/components/responses/StorageError'
         '503':
@@ -186,7 +186,7 @@ paths:
         '408':
           description: Timeout waiting for acknowledgment (default 25s)
         '429':
-          $ref: '#/components/responses/ClientWaitLimitReached'
+          $ref: '#/components/responses/ClientWaitingLimitReached'
         '500':
           $ref: '#/components/responses/StorageError'
         '503':
@@ -214,7 +214,7 @@ paths:
         '408':
           $ref: '#/components/responses/Timeout'
         '429':
-          $ref: '#/components/responses/ClientWaitLimitReached'
+          $ref: '#/components/responses/ClientWaitingLimitReached'
         '500':
           $ref: '#/components/responses/StorageError'
         '503':
@@ -247,14 +247,15 @@ paths:
         '429':
           description: |
             This client already has the maximum number of unacknowledged
-            messages stored (see `ClientLimitReached`, with `Retry-After`), or
-            of waiting requests (see `ClientWaitLimitReached`, without it). The
-            message is not stored.
+            messages stored (see `ClientMessageLimitReached`, sent with
+            `Retry-After`), or of waiting requests (see
+            `ClientWaitingLimitReached`, sent without it). The message is not
+            stored.
           headers:
             Retry-After:
               description: |
                 Only when the client has too many unacknowledged messages
-                stored; see `ClientLimitReached`.
+                stored; see `ClientMessageLimitReached`.
               schema:
                 type: integer
                 minimum: 1
@@ -430,7 +431,7 @@ components:
             type: string
           example: Too many concurrent requests
 
-    ClientLimitReached:
+    ClientMessageLimitReached:
       description: |
         This client already has the maximum number of unacknowledged messages
         stored (`--max-entries-per-client`, 100 by default). A client is an
@@ -452,14 +453,14 @@ components:
             type: string
           example: Too many unacknowledged messages from this client
 
-    ClientWaitLimitReached:
+    ClientWaitingLimitReached:
       description: |
         This client already has the maximum number of waiting requests
-        (`--max-entries-per-client`, 100 by default), such as long-poll `GET`,
-        `/await`, and `/link` requests. A client is an IPv4 address or an IPv6
-        /56 network. Retry after one of the client's waiting requests ends.
-        A request for a message that is already stored doesn't wait and never
-        gets this response.
+        (`--max-entries-per-client`, 100 by default). Waiting requests are
+        `GET /inbox/{id}`, `GET /inbox/{id}/await`, and both `/link/{id}`
+        methods. A client is an IPv4 address or an IPv6 /56 network. Retry
+        after one of the client's waiting requests ends. A `GET` for a message
+        that is already stored doesn't wait and never gets this response.
       content:
         text/plain:
           schema:

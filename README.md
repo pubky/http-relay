@@ -80,7 +80,7 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--link-timeout <SECS>` | Link endpoint timeout | `600` |
 | `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
 | `--max-entries <N>` | Max stored entries, and max IDs with waiting requests. When the store is full, expired and ACKed entries make room; if there are none, `POST` to a new ID returns `503` | `10000` |
-| `--max-entries-per-client <N>` | Max unACKed messages one client can have stored, and max requests it can have waiting; counted separately. Further requests return `429`. A client is an IPv4 address or an IPv6 /56 network | `100` |
+| `--max-entries-per-client <N>` | Max unACKed messages one client can have stored, and, counted separately, max requests it can have waiting. Requests over either limit return `429`. A client is an IPv4 address or an IPv6 /56 network | `100` |
 | `--persist-db <PATH>` | SQLite database path for persistence (`persist` feature) | (in-memory) |
 | `--cors-allow-all` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) | off |
 | `--trusted-proxy <CIDR>` | Identify clients behind this proxy by `X-Forwarded-For`. Repeatable. See [DEPLOY.md](DEPLOY.md) | off (TCP peer) |
@@ -170,7 +170,7 @@ curl http://localhost:8080/inbox/my-channel
 - `408 Request Timeout` - No message arrived within timeout (25s default)
 - `429 Too Many Requests` - No message is stored, and this client already has
   the maximum number of waiting requests (`--max-entries-per-client`). Retry
-  after one of them ends.
+  after one of its waiting requests ends.
 - `503 Service Unavailable` - Too many requests already wait for this ID, or
   too many IDs have waiting requests
 
@@ -274,9 +274,10 @@ backwards compatibility but not recommended for new integrations.
 | `POST` | `/link/{id}` | Send message, block until consumer retrieves (10 min timeout) |
 | `GET` | `/link/{id}` | Retrieve message, block until producer sends (10 min timeout) |
 
-Both count as waiting requests toward `--max-entries-per-client`: over the
-limit, they get `429 Too Many Requests`, and a rejected `POST` stores nothing.
-A `GET` for a message that is already there doesn't wait and isn't limited.
+Both methods count as waiting requests toward `--max-entries-per-client`. Over
+the limit, they get `429 Too Many Requests`, and a rejected `POST` stores
+nothing. A `GET` for a message that is already stored doesn't wait, so the limit
+doesn't apply to it.
 
 **Why prefer `/inbox`:** The `/link` endpoint has no ACK mechanism—if the consumer
 disconnects after receiving data, the producer still gets `200 OK`. The 10-minute

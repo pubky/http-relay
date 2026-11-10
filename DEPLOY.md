@@ -72,26 +72,27 @@ is then logged with a `client_ip` field.
 
 ## Limits per client
 
-`--max-entries` limits two shared resources: stored entries, and IDs with
-waiting requests. When either is full, other clients' requests get `503`. To
-keep a single client from filling them, `--max-entries-per-client`, 100 by
-default, limits two things per client, counted separately:
+`--max-entries` limits two things that all clients share: stored entries, and
+IDs with waiting requests. When either is full, requests for a new ID get `503`.
+To keep a single client from filling them, `--max-entries-per-client`, 100 by
+default, sets two limits for each client. They are counted separately, so with
+the defaults a client can have 100 messages stored and 100 requests waiting at
+the same time.
 
-- **Stored unACKed messages:** a stored message stays until its consumer ACKs
+- **Stored unACKed messages:** a stored message counts until its consumer ACKs
   it or it expires. Further `POST` requests to `/inbox/{id}` and `/link/{id}`
   get `429 Too Many Requests` with a `Retry-After` header. Replacing one of the
   client's unACKed messages is still allowed.
-- **Waiting requests:** a request that waits, such as a long-poll `GET`, an
-  `/await`, or a `/link` request, counts until it ends: with a response, a
-  timeout, or a disconnect. Further waiting requests get `429 Too Many
-  Requests` without `Retry-After`, and a rejected `POST /link/{id}` stores
-  nothing. A `GET` for a message that is already stored is answered at once
-  and isn't limited. A client whose network drops without closing the
-  connection keeps counting until the relay notices, at the latest when the
-  request times out.
+- **Waiting requests:** a request that waits counts until it ends with a
+  response, a timeout, or a disconnect. These are `GET /inbox/{id}`,
+  `GET /inbox/{id}/await`, and both `/link/{id}` methods. Further waiting
+  requests get `429 Too Many Requests` without a `Retry-After` header, and a
+  rejected `POST /link/{id}` stores nothing. A `GET` for a message that is
+  already stored doesn't wait, so this limit doesn't apply to it. If a client's
+  network drops without closing the connection, its request still counts until
+  the relay notices: at the latest, when the request times out.
 
-With the defaults, a client can have 100 messages stored and 100 requests
-waiting at the same time.
+Keep the following in mind when you choose the limit:
 
 - **What counts as one client:** an IPv4 address, or an IPv6 /56 network. ISPs
   usually give each customer at least a /56, so a limit per IPv6 address would
@@ -100,8 +101,8 @@ waiting at the same time.
   behind carrier-grade NAT. Each user normally has only a few unACKed messages
   and waiting requests at a time, so the default leaves room for many users per
   address. Raise `--max-entries-per-client` if your users' clients get `429`.
-  Set to `--max-entries` or higher, it no longer protects anything: one client
-  can then fill the store and every slot for waiting IDs.
+  At `--max-entries` or higher, the limit no longer protects anything: one
+  client can fill the store and take every slot for waiting IDs.
 - **What the limit doesn't cover:** clients with many addresses can still fill
   the store together. The limit raises the cost: with the defaults, filling the
   store takes 100 IPv4 addresses or IPv6 /56 networks. IPv6 networks are cheap,
@@ -174,8 +175,8 @@ Notes:
 - `$binary_remote_addr` is the full client address. Over IPv4 that is one
   host, but an IPv6 host usually has a whole /64 and can use a new address for
   each connection, so `limit_conn` doesn't limit it. Nginx can't group IPv6
-  addresses by network itself. The relay still limits waiting requests per
-  IPv6 /56, but not connections. If abuse over IPv6 is a concern, limit
+  addresses by network itself. The relay limits waiting requests per IPv6
+  /56, but not connections. If abuse over IPv6 is a concern, limit
   connections per network in front of Nginx, for example in a firewall or a
   CDN.
 - If the relay runs in a container, trust the address Nginx connects from, such

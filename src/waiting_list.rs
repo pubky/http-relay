@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 
 use crate::client_ip::ClientNetwork;
 use crate::storage::{EntryRepository, InsertOutcome, Message, StoredEntry};
-use crate::waiting_clients::{WaitPermit, WaitingClients};
+use crate::wait_permits::{WaitPermit, WaitPermits};
 
 /// Bounds concurrent long-poll connections per ID and waiter kind (ACK or message).
 ///
@@ -34,12 +34,15 @@ const FULL_MAP_PRUNE_INTERVAL: Duration = Duration::from_secs(1);
 /// stays open until the next message arrives.
 pub(crate) enum Delivery<T> {
     Ready(T),
-    /// Keep the permit until the wait ends: it counts the waiting request
-    /// against its client's limit.
-    Pending(oneshot::Receiver<T>, WaitPermit),
+    Pending {
+        receiver: oneshot::Receiver<T>,
+        /// Counts the request against its client's limit of waiting requests.
+        /// Keep it until the wait ends.
+        permit: WaitPermit,
+    },
 }
 
-/// Limits on the requests that wait.
+/// Limits on the requests that wait for a message or an ACK.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WaitingLimits {
     /// Maximum number of distinct IDs with waiting requests.
@@ -55,10 +58,10 @@ pub(crate) enum WaitingListError {
     WaiterLimitReached,
     /// The client already has as many open waiting requests as it may.
     /// Nothing was stored.
-    ClientWaitLimitReached,
+    ClientWaitingLimitReached,
     /// The client already has as many unACKed messages stored as it may.
     /// Nothing was stored. One of its messages expires after `retry_after`.
-    ClientLimitReached {
+    ClientMessageLimitReached {
         retry_after: Duration,
     },
     /// The store has no room for a new ID. Nothing was stored.
@@ -163,9 +166,9 @@ pub(crate) struct WaitingList {
     max_waiting_ids: usize,
     /// When a full waiter map was last pruned (see [`FULL_MAP_PRUNE_INTERVAL`]).
     last_full_map_prune: Option<Instant>,
-    /// Open waiting requests per client, so that no client can take all
+    /// One permit per waiting request, so that no client can take all
     /// `max_waiting_ids`.
-    waiting_clients: WaitingClients,
+    wait_permits: WaitPermits,
 }
 
 impl WaitingList {
@@ -175,7 +178,7 @@ impl WaitingList {
             waiters: HashMap::new(),
             max_waiting_ids: limits.max_ids,
             last_full_map_prune: None,
-            waiting_clients: WaitingClients::new(limits.max_requests_per_client),
+            wait_permits: WaitPermits::new(limits.max_requests_per_client),
         }
     }
 
@@ -198,9 +201,10 @@ impl WaitingList {
 
     /// Stores a message and waits for its ACK (link producer).
     ///
-    /// Checks for waiter room before storing: a producer rejected with
-    /// `WaiterLimitReached` or `ClientWaitLimitReached` must be able to retry
-    /// without its first message having been delivered already.
+    /// Gets the producer's wait permit and checks for waiter room before
+    /// storing: a producer rejected with `ClientWaitingLimitReached` or
+    /// `WaiterLimitReached` must be able to retry without its first message
+    /// having been delivered already.
     #[cfg(feature = "link-compat")]
     pub fn store_and_subscribe_ack(
         &mut self,
@@ -209,7 +213,7 @@ impl WaitingList {
         ttl: Duration,
         producer: ClientNetwork,
     ) -> Result<Delivery<()>, WaitingListError> {
-        let permit = self.start_waiting(producer)?;
+        let permit = self.acquire_wait_permit(producer)?;
         self.ensure_waiter_capacity(id)?;
         let acked = self.deliver(id, message, ttl, producer)?;
         if acked {
@@ -271,7 +275,7 @@ impl WaitingList {
             None => Ok(None),
             Some(StoredEntry::Acked) => Ok(Some(Delivery::Ready(()))),
             Some(StoredEntry::Unacked(_)) => {
-                let permit = self.start_waiting(client)?;
+                let permit = self.acquire_wait_permit(client)?;
                 self.add_ack_waiter(id, permit).map(Some)
             }
         }
@@ -312,7 +316,7 @@ impl WaitingList {
                 }
             }
             InsertOutcome::ClientLimitReached { retry_after } => {
-                return Err(WaitingListError::ClientLimitReached { retry_after })
+                return Err(WaitingListError::ClientMessageLimitReached { retry_after })
             }
             InsertOutcome::StoreFull => return Err(WaitingListError::StoreFull),
         }
@@ -339,8 +343,8 @@ impl WaitingList {
         Ok(acked)
     }
 
-    /// Returns the stored message at once, also to a client at its limit of
-    /// waiting requests, or waits for the next one.
+    /// Returns the stored message, or waits for the next one. A stored message
+    /// needs no wait permit, so a client at its limit still gets it.
     fn receive(
         &mut self,
         id: &str,
@@ -354,14 +358,14 @@ impl WaitingList {
             return Ok(Delivery::Ready(message));
         }
 
-        let permit = self.start_waiting(client)?;
+        let permit = self.acquire_wait_permit(client)?;
         let (sender, receiver) = oneshot::channel();
         let waiter = MessageWaiter {
             sender,
             acks_on_delivery: ack_on_receive,
         };
         if self.waiters_for(id)?.messages.add(waiter) {
-            Ok(Delivery::Pending(receiver, permit))
+            Ok(Delivery::Pending { receiver, permit })
         } else {
             Err(WaitingListError::WaiterLimitReached)
         }
@@ -374,18 +378,18 @@ impl WaitingList {
     ) -> Result<Delivery<()>, WaitingListError> {
         let (sender, receiver) = oneshot::channel();
         if self.waiters_for(id)?.acks.add(sender) {
-            Ok(Delivery::Pending(receiver, permit))
+            Ok(Delivery::Pending { receiver, permit })
         } else {
             Err(WaitingListError::WaiterLimitReached)
         }
     }
 
-    /// Counts a waiting request from `client`, or fails if the client already
-    /// has as many open waiting requests as it may.
-    fn start_waiting(&self, client: ClientNetwork) -> Result<WaitPermit, WaitingListError> {
-        self.waiting_clients
-            .try_start(client)
-            .ok_or(WaitingListError::ClientWaitLimitReached)
+    /// Gets a permit for one more waiting request from `client`, or fails if
+    /// the client already has as many open waiting requests as it may.
+    fn acquire_wait_permit(&self, client: ClientNetwork) -> Result<WaitPermit, WaitingListError> {
+        self.wait_permits
+            .try_acquire(client)
+            .ok_or(WaitingListError::ClientWaitingLimitReached)
     }
 
     /// Removes and returns the ACK waiters for `id`, and `id` itself if no
@@ -477,7 +481,7 @@ mod tests {
 
     fn pending<T>(delivery: Delivery<T>) -> oneshot::Receiver<T> {
         match delivery {
-            Delivery::Pending(receiver, _permit) => receiver,
+            Delivery::Pending { receiver, .. } => receiver,
             Delivery::Ready(_) => panic!("expected to wait"),
         }
     }
@@ -485,7 +489,7 @@ mod tests {
     fn ready<T>(delivery: Delivery<T>) -> T {
         match delivery {
             Delivery::Ready(value) => value,
-            Delivery::Pending(..) => panic!("expected a value now"),
+            Delivery::Pending { .. } => panic!("expected a value now"),
         }
     }
 
@@ -532,7 +536,7 @@ mod tests {
 
         assert!(matches!(
             list.get_or_subscribe("id", alice()).unwrap(),
-            Delivery::Pending(..)
+            Delivery::Pending { .. }
         ));
     }
 
@@ -827,8 +831,8 @@ mod tests {
         WaitingList::new(test_repository(100), limits)
     }
 
-    fn is_client_limit<T>(result: Result<T, WaitingListError>) -> bool {
-        matches!(result, Err(WaitingListError::ClientWaitLimitReached))
+    fn is_client_waiting_limit<T>(result: Result<T, WaitingListError>) -> bool {
+        matches!(result, Err(WaitingListError::ClientWaitingLimitReached))
     }
 
     #[test]
@@ -837,7 +841,7 @@ mod tests {
         let _first = list.get_or_subscribe("a", alice()).unwrap();
         let _second = list.get_or_subscribe("b", alice()).unwrap();
 
-        assert!(is_client_limit(list.get_or_subscribe("c", alice())));
+        assert!(is_client_waiting_limit(list.get_or_subscribe("c", alice())));
         assert!(list.get_or_subscribe("c", bob()).is_ok());
     }
 
@@ -847,7 +851,7 @@ mod tests {
         list.store("a", message("hello"), TTL, bob()).unwrap();
         let _waiting = list.get_or_subscribe("b", alice()).unwrap();
 
-        assert!(is_client_limit(list.subscribe_ack("a", alice())));
+        assert!(is_client_waiting_limit(list.subscribe_ack("a", alice())));
     }
 
     #[cfg(feature = "link-compat")]
@@ -856,7 +860,9 @@ mod tests {
         let mut list = list_with_client_limit(1);
         let _waiting = list.get_or_subscribe("a", alice()).unwrap();
 
-        assert!(is_client_limit(list.take_or_subscribe("b", alice())));
+        assert!(is_client_waiting_limit(
+            list.take_or_subscribe("b", alice())
+        ));
     }
 
     #[cfg(feature = "link-compat")]
@@ -867,7 +873,7 @@ mod tests {
 
         let result = list.store_and_subscribe_ack("b", message("hello"), TTL, alice());
 
-        assert!(is_client_limit(result));
+        assert!(is_client_waiting_limit(result));
         assert_eq!(list.is_acked("b").unwrap(), None);
     }
 
@@ -903,8 +909,8 @@ mod tests {
         assert!(list.get_or_subscribe("other", alice()).is_ok());
     }
 
-    #[test]
-    fn stored_messages_and_waiting_requests_are_counted_separately() {
+    /// One stored message and one waiting request per client.
+    fn list_with_client_limits_of_one() -> WaitingList {
         let repository = test_repository_with_capacity(Capacity {
             max_entries: 100,
             max_entries_per_client: 1,
@@ -913,15 +919,28 @@ mod tests {
             max_ids: 100,
             max_requests_per_client: 1,
         };
-        let mut list = WaitingList::new(repository, limits);
+        WaitingList::new(repository, limits)
+    }
+
+    #[test]
+    fn client_at_its_message_limit_can_still_wait() {
+        let mut list = list_with_client_limits_of_one();
         list.store("stored", message("hello"), TTL, alice())
             .unwrap();
 
-        let _waiting = list.get_or_subscribe("a", alice()).unwrap();
-        assert!(matches!(
-            list.store("other", message("hello"), TTL, alice()),
-            Err(WaitingListError::ClientLimitReached { .. })
-        ));
+        let waiting = list.get_or_subscribe("other", alice());
+
+        assert!(waiting.is_ok());
+    }
+
+    #[test]
+    fn client_at_its_waiting_limit_can_still_store() {
+        let mut list = list_with_client_limits_of_one();
+        let _waiting = list.get_or_subscribe("waiting", alice()).unwrap();
+
+        let stored = list.store("other", message("hello"), TTL, alice());
+
+        assert!(stored.is_ok());
     }
 
     // ========== remove_expired ==========

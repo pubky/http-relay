@@ -198,10 +198,11 @@ impl HttpRelayBuilder {
     /// - `POST` of a further message gets `429 Too Many Requests`, until one
     ///   of the client's messages is ACKed or expires. Replacing one of the
     ///   client's unACKed messages is always allowed.
-    /// - A further request that would wait (a long-poll `GET`, `/await`, or
-    ///   `/link` request) gets `429 Too Many Requests`, until one of the
-    ///   client's waiting requests ends. A `GET` for a stored message doesn't
-    ///   wait and isn't limited.
+    /// - A further request that would wait gets `429 Too Many Requests`,
+    ///   until one of the client's waiting requests ends. Waiting requests are
+    ///   `GET /inbox/{id}`, `GET /inbox/{id}/await`, and both `/link/{id}`
+    ///   methods. A `GET` for a message that is already stored doesn't wait, so
+    ///   the limit doesn't apply to it.
     ///
     /// A client is an IPv4 address or an IPv6 /56 network; see
     /// [`Self::trusted_proxies`] for how the relay finds it. At

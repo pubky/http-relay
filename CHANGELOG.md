@@ -21,10 +21,11 @@ All notable changes are documented here. The format is based on
     `/inbox/{id}` and `/link/{id}` get `429 Too Many Requests` with a
     `Retry-After` header. Replacing one of the client's unACKed messages is
     always allowed.
-  - The requests the client can have waiting: long-poll `GET`s, `/await`, and
-    `/link` requests. Further ones get `429 Too Many Requests`, and a rejected
-    `POST /link/{id}` stores nothing. A `GET` for a message that is already
-    stored isn't limited. Without this limit, a few clients could take every
+  - The requests the client can have waiting: `GET /inbox/{id}`,
+    `GET /inbox/{id}/await`, and both `/link/{id}` methods. Further ones get
+    `429 Too Many Requests`, and a rejected `POST /link/{id}` stores nothing.
+    A `GET` for a message that is already stored doesn't wait, so the limit
+    doesn't apply to it. Without this limit, a few clients could take every
     slot for waiting IDs, and everyone else's requests for new IDs would get
     `503`.
 
