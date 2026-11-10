@@ -529,7 +529,10 @@ mod tests {
     async fn test_waiting_requests_over_client_limit_get_429_until_one_ends() {
         let server = test_server(Config {
             max_waiting_per_client: 1,
-            inbox_timeout: Duration::from_millis(300),
+            // Wide margins for slow CI runners: the first request has 200 ms
+            // to start waiting, and the rejection 800 ms to arrive before the
+            // first request times out.
+            inbox_timeout: Duration::from_secs(1),
             trusted_proxies: vec!["127.0.0.1/32".parse().unwrap()],
             ..Config::default()
         });
@@ -539,7 +542,7 @@ mod tests {
 
         let waiting = get_as("198.51.100.1", "/inbox/a");
         let rejected = async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
             let rejected = get_as("198.51.100.1", "/inbox/b").await;
             let other_client = get_as("198.51.100.2", "/inbox/c").await;
             (rejected, other_client)
