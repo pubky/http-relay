@@ -95,6 +95,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '408':
           description: No message arrived within timeout (25s default)
+        '429':
+          $ref: '#/components/responses/ClientWaitLimitReached'
         '500':
           $ref: '#/components/responses/StorageError'
         '503':
@@ -183,6 +185,8 @@ paths:
           description: No message exists, or it expired or was replaced while waiting
         '408':
           description: Timeout waiting for acknowledgment (default 25s)
+        '429':
+          $ref: '#/components/responses/ClientWaitLimitReached'
         '500':
           $ref: '#/components/responses/StorageError'
         '503':
@@ -209,6 +213,8 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '408':
           $ref: '#/components/responses/Timeout'
+        '429':
+          $ref: '#/components/responses/ClientWaitLimitReached'
         '500':
           $ref: '#/components/responses/StorageError'
         '503':
@@ -239,7 +245,28 @@ paths:
         '408':
           $ref: '#/components/responses/Timeout'
         '429':
-          $ref: '#/components/responses/ClientLimitReached'
+          description: |
+            This client already has the maximum number of unacknowledged
+            messages stored (see `ClientLimitReached`, with `Retry-After`), or
+            of waiting requests (see `ClientWaitLimitReached`, without it). The
+            message is not stored.
+          headers:
+            Retry-After:
+              description: |
+                Only when the client has too many unacknowledged messages
+                stored; see `ClientLimitReached`.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                storedMessages:
+                  value: Too many unacknowledged messages from this client
+                waitingRequests:
+                  value: Too many waiting requests from this client
         '500':
           $ref: '#/components/responses/StorageError'
         '503':
@@ -424,6 +451,20 @@ components:
           schema:
             type: string
           example: Too many unacknowledged messages from this client
+
+    ClientWaitLimitReached:
+      description: |
+        This client already has the maximum number of waiting requests
+        (`--max-entries-per-client`, 100 by default), such as long-poll `GET`,
+        `/await`, and `/link` requests. A client is an IPv4 address or an IPv6
+        /56 network. Retry after one of the client's waiting requests ends.
+        A request for a message that is already stored doesn't wait and never
+        gets this response.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Too many waiting requests from this client
 
     ServerAtCapacity:
       description: |

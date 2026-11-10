@@ -44,8 +44,16 @@ async fn mark_deprecated(mut response: Response) -> Response {
 }
 
 /// GET /link/{id} - Consumer waits for producer, auto-ACKs on receive.
-async fn get_message(Id(id): Id, State(state): State<AppState>) -> Result<Message, RelayError> {
-    let delivery = state.waiting_list.lock().await.take_or_subscribe(&id)?;
+async fn get_message(
+    Id(id): Id,
+    State(state): State<AppState>,
+    Extension(client_ip): Extension<ClientIp>,
+) -> Result<Message, RelayError> {
+    let delivery = state
+        .waiting_list
+        .lock()
+        .await
+        .take_or_subscribe(&id, client_ip.network())?;
     wait_for(delivery, state.config.link_timeout).await
 }
 

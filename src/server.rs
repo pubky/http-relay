@@ -5,8 +5,9 @@
 //! Production deployments require a reverse proxy that parses HTTP. The proxy
 //! terminates TLS, times out slow clients, and limits connections per client IP.
 //! The relay itself has no authentication, no request rate limits, and no
-//! protection against clients that send requests slowly. Its only limit per
-//! client is on stored unACKed messages. See `DEPLOY.md`.
+//! protection against clients that send requests slowly. Its only limits per
+//! client are on stored unACKed messages and on waiting requests. See
+//! `DEPLOY.md`.
 //!
 //! # CORS Configuration
 //!
@@ -39,7 +40,7 @@ use url::Url;
 
 use crate::client_ip::{identify_client, TrustedProxies};
 use crate::storage::{Capacity, EntryRepository};
-use crate::waiting_list::WaitingList;
+use crate::waiting_list::{WaitingLimits, WaitingList};
 
 /// How often expired entries are deleted. Balances memory reclamation against
 /// the cost of scanning all entries.
@@ -65,7 +66,8 @@ pub(crate) struct Config {
     pub max_body_size: usize,
     /// Maximum stored entries, and maximum IDs with waiting requests.
     pub max_entries: usize,
-    /// Maximum live unACKed entries stored by one client.
+    /// Maximum live unACKed entries stored by one client, and maximum open
+    /// waiting requests of one client.
     pub max_entries_per_client: usize,
     /// Path to SQLite database for persistent storage.
     /// If None, uses in-memory storage (data lost on restart).
@@ -189,15 +191,23 @@ impl HttpRelayBuilder {
         self
     }
 
-    /// Configure the maximum unACKed messages one client can have stored
-    /// (default: 100). `POST` of a further message gets `429 Too Many
-    /// Requests`, until one of the client's messages is ACKed or expires.
-    /// Replacing one of the client's unACKed messages is always allowed.
+    /// Configure the maximum unACKed messages one client can have stored, and
+    /// the maximum requests it can have waiting (default: 100). The two are
+    /// counted separately.
+    ///
+    /// - `POST` of a further message gets `429 Too Many Requests`, until one
+    ///   of the client's messages is ACKed or expires. Replacing one of the
+    ///   client's unACKed messages is always allowed.
+    /// - A further request that would wait (a long-poll `GET`, `/await`, or
+    ///   `/link` request) gets `429 Too Many Requests`, until one of the
+    ///   client's waiting requests ends. A `GET` for a stored message doesn't
+    ///   wait and isn't limited.
     ///
     /// A client is an IPv4 address or an IPv6 /56 network; see
-    /// [`Self::trusted_proxies`] for how the relay finds it. To turn the limit
-    /// off, set it higher than [`Self::max_entries`]. Must be at least 1;
-    /// otherwise [`Self::run`] fails.
+    /// [`Self::trusted_proxies`] for how the relay finds it. At
+    /// [`Self::max_entries`] or higher, one client can take every stored entry
+    /// and every slot for waiting IDs. Must be at least 1; otherwise
+    /// [`Self::run`] fails.
     pub fn max_entries_per_client(mut self, max: usize) -> Self {
         self.0.max_entries_per_client = max;
         self
@@ -279,7 +289,11 @@ fn build_router(state: AppState) -> Router {
 }
 
 fn app_state(config: Config) -> Result<AppState> {
-    let waiting_list = WaitingList::new(config.open_storage()?, config.max_entries);
+    let limits = WaitingLimits {
+        max_ids: config.max_entries,
+        max_requests_per_client: config.max_entries_per_client,
+    };
+    let waiting_list = WaitingList::new(config.open_storage()?, limits);
     Ok(AppState {
         config: Arc::new(config),
         waiting_list: Arc::new(Mutex::new(waiting_list)),
@@ -318,7 +332,7 @@ pub struct HttpRelay {
 
 impl HttpRelay {
     async fn start(config: Config) -> Result<Self> {
-        // A limit of 0 would reject every POST.
+        // A limit of 0 would reject every POST and every waiting request.
         anyhow::ensure!(
             config.max_entries_per_client > 0,
             "max_entries_per_client must be at least 1"

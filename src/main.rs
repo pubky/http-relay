@@ -47,7 +47,8 @@ struct Args {
     max_entries: usize,
 
     /// Maximum unACKed messages one client (IPv4 address or IPv6 /56) can have
-    /// stored. Further messages get 429
+    /// stored, and maximum requests it can have waiting, counted separately.
+    /// Further requests get 429
     #[arg(
         long,
         default_value_t = NonZeroUsize::new(HttpRelayBuilder::DEFAULT_MAX_ENTRIES_PER_CLIENT)

@@ -11,6 +11,7 @@ use tokio::sync::oneshot;
 
 use crate::client_ip::ClientNetwork;
 use crate::storage::{EntryRepository, InsertOutcome, Message, StoredEntry};
+use crate::waiting_clients::{WaitPermit, WaitingClients};
 
 /// Bounds concurrent long-poll connections per ID and waiter kind (ACK or message).
 ///
@@ -33,7 +34,18 @@ const FULL_MAP_PRUNE_INTERVAL: Duration = Duration::from_secs(1);
 /// stays open until the next message arrives.
 pub(crate) enum Delivery<T> {
     Ready(T),
-    Pending(oneshot::Receiver<T>),
+    /// Keep the permit until the wait ends: it counts the waiting request
+    /// against its client's limit.
+    Pending(oneshot::Receiver<T>, WaitPermit),
+}
+
+/// Limits on the requests that wait.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WaitingLimits {
+    /// Maximum number of distinct IDs with waiting requests.
+    pub max_ids: usize,
+    /// Maximum open waiting requests of one client.
+    pub max_requests_per_client: usize,
 }
 
 /// Why the waiting list couldn't serve a request.
@@ -41,6 +53,9 @@ pub(crate) enum Delivery<T> {
 pub(crate) enum WaitingListError {
     /// Maximum waiters for this ID, or maximum number of waiting IDs, reached.
     WaiterLimitReached,
+    /// The client already has as many open waiting requests as it may.
+    /// Nothing was stored.
+    ClientWaitLimitReached,
     /// The client already has as many unACKed messages stored as it may.
     /// Nothing was stored. One of its messages expires after `retry_after`.
     ClientLimitReached {
@@ -148,15 +163,19 @@ pub(crate) struct WaitingList {
     max_waiting_ids: usize,
     /// When a full waiter map was last pruned (see [`FULL_MAP_PRUNE_INTERVAL`]).
     last_full_map_prune: Option<Instant>,
+    /// Open waiting requests per client, so that no client can take all
+    /// `max_waiting_ids`.
+    waiting_clients: WaitingClients,
 }
 
 impl WaitingList {
-    pub fn new(repository: EntryRepository, max_waiting_ids: usize) -> Self {
+    pub fn new(repository: EntryRepository, limits: WaitingLimits) -> Self {
         Self {
             repository,
             waiters: HashMap::new(),
-            max_waiting_ids,
+            max_waiting_ids: limits.max_ids,
             last_full_map_prune: None,
+            waiting_clients: WaitingClients::new(limits.max_requests_per_client),
         }
     }
 
@@ -180,8 +199,8 @@ impl WaitingList {
     /// Stores a message and waits for its ACK (link producer).
     ///
     /// Checks for waiter room before storing: a producer rejected with
-    /// `WaiterLimitReached` must be able to retry without its first message
-    /// having been delivered already.
+    /// `WaiterLimitReached` or `ClientWaitLimitReached` must be able to retry
+    /// without its first message having been delivered already.
     #[cfg(feature = "link-compat")]
     pub fn store_and_subscribe_ack(
         &mut self,
@@ -190,6 +209,7 @@ impl WaitingList {
         ttl: Duration,
         producer: ClientNetwork,
     ) -> Result<Delivery<()>, WaitingListError> {
+        let permit = self.start_waiting(producer)?;
         self.ensure_waiter_capacity(id)?;
         let acked = self.deliver(id, message, ttl, producer)?;
         if acked {
@@ -197,19 +217,27 @@ impl WaitingList {
         }
         // Can't fail with `WaiterLimitReached` after the check above: `deliver`
         // only removes waiters, and it removed all waiters for `id`.
-        self.add_ack_waiter(id)
+        self.add_ack_waiter(id, permit)
     }
 
     /// Returns the stored message, or waits for the next one (inbox consumer).
-    pub fn get_or_subscribe(&mut self, id: &str) -> Result<Delivery<Message>, WaitingListError> {
-        self.receive(id, false)
+    pub fn get_or_subscribe(
+        &mut self,
+        id: &str,
+        client: ClientNetwork,
+    ) -> Result<Delivery<Message>, WaitingListError> {
+        self.receive(id, false, client)
     }
 
     /// Returns the stored message, or waits for the next one, and ACKs it
     /// in the same step (link consumer), so it can't ACK a newer message.
     #[cfg(feature = "link-compat")]
-    pub fn take_or_subscribe(&mut self, id: &str) -> Result<Delivery<Message>, WaitingListError> {
-        self.receive(id, true)
+    pub fn take_or_subscribe(
+        &mut self,
+        id: &str,
+        client: ClientNetwork,
+    ) -> Result<Delivery<Message>, WaitingListError> {
+        self.receive(id, true, client)
     }
 
     /// ACKs the entry and notifies the requests waiting for the ACK.
@@ -234,11 +262,18 @@ impl WaitingList {
     }
 
     /// Waits for the entry's ACK, or returns `None` if there is no live entry.
-    pub fn subscribe_ack(&mut self, id: &str) -> Result<Option<Delivery<()>>, WaitingListError> {
+    pub fn subscribe_ack(
+        &mut self,
+        id: &str,
+        client: ClientNetwork,
+    ) -> Result<Option<Delivery<()>>, WaitingListError> {
         match self.repository.get(id)? {
             None => Ok(None),
             Some(StoredEntry::Acked) => Ok(Some(Delivery::Ready(()))),
-            Some(StoredEntry::Unacked(_)) => self.add_ack_waiter(id).map(Some),
+            Some(StoredEntry::Unacked(_)) => {
+                let permit = self.start_waiting(client)?;
+                self.add_ack_waiter(id, permit).map(Some)
+            }
         }
     }
 
@@ -304,10 +339,13 @@ impl WaitingList {
         Ok(acked)
     }
 
+    /// Returns the stored message at once, also to a client at its limit of
+    /// waiting requests, or waits for the next one.
     fn receive(
         &mut self,
         id: &str,
         ack_on_receive: bool,
+        client: ClientNetwork,
     ) -> Result<Delivery<Message>, WaitingListError> {
         if let Some(StoredEntry::Unacked(message)) = self.repository.get(id)? {
             if ack_on_receive {
@@ -316,25 +354,38 @@ impl WaitingList {
             return Ok(Delivery::Ready(message));
         }
 
+        let permit = self.start_waiting(client)?;
         let (sender, receiver) = oneshot::channel();
         let waiter = MessageWaiter {
             sender,
             acks_on_delivery: ack_on_receive,
         };
         if self.waiters_for(id)?.messages.add(waiter) {
-            Ok(Delivery::Pending(receiver))
+            Ok(Delivery::Pending(receiver, permit))
         } else {
             Err(WaitingListError::WaiterLimitReached)
         }
     }
 
-    fn add_ack_waiter(&mut self, id: &str) -> Result<Delivery<()>, WaitingListError> {
+    fn add_ack_waiter(
+        &mut self,
+        id: &str,
+        permit: WaitPermit,
+    ) -> Result<Delivery<()>, WaitingListError> {
         let (sender, receiver) = oneshot::channel();
         if self.waiters_for(id)?.acks.add(sender) {
-            Ok(Delivery::Pending(receiver))
+            Ok(Delivery::Pending(receiver, permit))
         } else {
             Err(WaitingListError::WaiterLimitReached)
         }
+    }
+
+    /// Counts a waiting request from `client`, or fails if the client already
+    /// has as many open waiting requests as it may.
+    fn start_waiting(&self, client: ClientNetwork) -> Result<WaitPermit, WaitingListError> {
+        self.waiting_clients
+            .try_start(client)
+            .ok_or(WaitingListError::ClientWaitLimitReached)
     }
 
     /// Removes and returns the ACK waiters for `id`, and `id` itself if no
@@ -394,7 +445,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
-    use crate::storage::{test_client, test_repository};
+    use crate::storage::{test_client, test_repository, test_repository_with_capacity, Capacity};
 
     const TTL: Duration = Duration::from_secs(60);
 
@@ -402,8 +453,19 @@ mod tests {
         test_client("198.51.100.1")
     }
 
+    fn bob() -> ClientNetwork {
+        test_client("198.51.100.2")
+    }
+
+    fn unlimited_clients(max_ids: usize) -> WaitingLimits {
+        WaitingLimits {
+            max_ids,
+            max_requests_per_client: usize::MAX,
+        }
+    }
+
     fn list(max_ids: usize) -> WaitingList {
-        WaitingList::new(test_repository(100), max_ids)
+        WaitingList::new(test_repository(100), unlimited_clients(max_ids))
     }
 
     fn message(body: &'static str) -> Message {
@@ -415,7 +477,7 @@ mod tests {
 
     fn pending<T>(delivery: Delivery<T>) -> oneshot::Receiver<T> {
         match delivery {
-            Delivery::Pending(receiver) => receiver,
+            Delivery::Pending(receiver, _permit) => receiver,
             Delivery::Ready(_) => panic!("expected to wait"),
         }
     }
@@ -423,7 +485,7 @@ mod tests {
     fn ready<T>(delivery: Delivery<T>) -> T {
         match delivery {
             Delivery::Ready(value) => value,
-            Delivery::Pending(_) => panic!("expected a value now"),
+            Delivery::Pending(..) => panic!("expected a value now"),
         }
     }
 
@@ -447,7 +509,7 @@ mod tests {
         let mut list = list(10);
         list.store("id", message("hello"), TTL, alice()).unwrap();
 
-        let delivery = list.get_or_subscribe("id").unwrap();
+        let delivery = list.get_or_subscribe("id", alice()).unwrap();
 
         assert_eq!(ready(delivery), message("hello"));
     }
@@ -455,7 +517,7 @@ mod tests {
     #[tokio::test]
     async fn waiting_consumer_receives_next_message() {
         let mut list = list(10);
-        let receiver = pending(list.get_or_subscribe("id").unwrap());
+        let receiver = pending(list.get_or_subscribe("id", alice()).unwrap());
 
         list.store("id", message("hello"), TTL, alice()).unwrap();
 
@@ -469,8 +531,8 @@ mod tests {
         list.ack("id").unwrap();
 
         assert!(matches!(
-            list.get_or_subscribe("id").unwrap(),
-            Delivery::Pending(_)
+            list.get_or_subscribe("id", alice()).unwrap(),
+            Delivery::Pending(..)
         ));
     }
 
@@ -493,7 +555,7 @@ mod tests {
     async fn ack_notifies_ack_waiters() {
         let mut list = list(10);
         list.store("id", message("hello"), TTL, alice()).unwrap();
-        let receiver = pending(list.subscribe_ack("id").unwrap().unwrap());
+        let receiver = pending(list.subscribe_ack("id", alice()).unwrap().unwrap());
 
         list.ack("id").unwrap();
 
@@ -503,19 +565,19 @@ mod tests {
     #[test]
     fn subscribe_ack_depends_on_the_entry() {
         let mut list = list(10);
-        assert!(list.subscribe_ack("id").unwrap().is_none());
+        assert!(list.subscribe_ack("id", alice()).unwrap().is_none());
 
         list.store("id", message("hello"), TTL, alice()).unwrap();
         list.ack("id").unwrap();
 
-        ready(list.subscribe_ack("id").unwrap().unwrap());
+        ready(list.subscribe_ack("id", alice()).unwrap().unwrap());
     }
 
     #[tokio::test]
     async fn new_message_drops_ack_waiters_of_the_replaced_one() {
         let mut list = list(10);
         list.store("id", message("first"), TTL, alice()).unwrap();
-        let receiver = pending(list.subscribe_ack("id").unwrap().unwrap());
+        let receiver = pending(list.subscribe_ack("id", alice()).unwrap().unwrap());
 
         list.store("id", message("second"), TTL, alice()).unwrap();
 
@@ -526,10 +588,10 @@ mod tests {
 
     #[tokio::test]
     async fn full_store_rejects_message_and_keeps_waiters_waiting() {
-        let mut list = WaitingList::new(test_repository(1), 10);
+        let mut list = WaitingList::new(test_repository(1), unlimited_clients(10));
         list.store("unacked", message("first"), TTL, alice())
             .unwrap();
-        let mut receiver = pending(list.get_or_subscribe("waiting").unwrap());
+        let mut receiver = pending(list.get_or_subscribe("waiting", alice()).unwrap());
 
         let result = list.store("waiting", message("second"), TTL, alice());
 
@@ -544,7 +606,7 @@ mod tests {
     async fn removing_an_expired_entry_to_make_room_drops_its_ack_waiters() {
         // Regression test: ACK waiters of an entry deleted to make room waited
         // until their timeout instead of failing at once.
-        let mut list = WaitingList::new(test_repository(1), 10);
+        let mut list = WaitingList::new(test_repository(1), unlimited_clients(10));
         list.store(
             "expires",
             message("hello"),
@@ -552,7 +614,7 @@ mod tests {
             alice(),
         )
         .unwrap();
-        let receiver = pending(list.subscribe_ack("expires").unwrap().unwrap());
+        let receiver = pending(list.subscribe_ack("expires", alice()).unwrap().unwrap());
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         list.store("new", message("hello"), TTL, alice()).unwrap();
@@ -569,7 +631,7 @@ mod tests {
         list.store("id", message("hello"), TTL, alice()).unwrap();
 
         assert_eq!(
-            ready(list.take_or_subscribe("id").unwrap()),
+            ready(list.take_or_subscribe("id", alice()).unwrap()),
             message("hello")
         );
         assert_eq!(list.is_acked("id").unwrap(), Some(true));
@@ -579,7 +641,7 @@ mod tests {
     #[tokio::test]
     async fn producer_is_acked_by_a_waiting_taker() {
         let mut list = list(10);
-        let consumer = pending(list.take_or_subscribe("id").unwrap());
+        let consumer = pending(list.take_or_subscribe("id", alice()).unwrap());
 
         let producer = list
             .store_and_subscribe_ack("id", message("hello"), TTL, alice())
@@ -595,7 +657,7 @@ mod tests {
         // Regression test: a link consumer that acked after a second lock
         // could ACK a message stored in between.
         let mut list = list(10);
-        let consumer = pending(list.take_or_subscribe("id").unwrap());
+        let consumer = pending(list.take_or_subscribe("id", alice()).unwrap());
         list.store("id", message("first"), TTL, alice()).unwrap();
         assert_eq!(consumer.await.unwrap(), message("first"));
 
@@ -610,7 +672,7 @@ mod tests {
     #[tokio::test]
     async fn inbox_consumer_does_not_ack() {
         let mut list = list(10);
-        let consumer = pending(list.get_or_subscribe("id").unwrap());
+        let consumer = pending(list.get_or_subscribe("id", alice()).unwrap());
 
         let producer = list
             .store_and_subscribe_ack("id", message("hello"), TTL, alice())
@@ -626,7 +688,7 @@ mod tests {
         // Regression test: a producer rejected for lack of waiter room must not
         // leave its message behind for a consumer to fetch.
         let mut list = list(1);
-        let _waiting = list.get_or_subscribe("occupied").unwrap();
+        let _waiting = list.get_or_subscribe("occupied", alice()).unwrap();
 
         let result = list.store_and_subscribe_ack("new", message("rejected"), TTL, alice());
 
@@ -638,7 +700,7 @@ mod tests {
     #[tokio::test]
     async fn store_and_subscribe_ack_for_waiting_id_at_limit_succeeds() {
         let mut list = list(1);
-        let consumer = pending(list.get_or_subscribe("id").unwrap());
+        let consumer = pending(list.get_or_subscribe("id", alice()).unwrap());
 
         let result = list.store_and_subscribe_ack("id", message("hello"), TTL, alice());
 
@@ -652,7 +714,7 @@ mod tests {
         let mut list = list(10);
         list.store("id", message("first"), TTL, alice()).unwrap();
         let receivers: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
-            .map(|_| pending(list.subscribe_ack("id").unwrap().unwrap()))
+            .map(|_| pending(list.subscribe_ack("id", alice()).unwrap().unwrap()))
             .collect();
 
         let result = list.store_and_subscribe_ack("id", message("second"), TTL, alice());
@@ -666,7 +728,7 @@ mod tests {
     #[cfg(feature = "link-compat")]
     #[test]
     fn store_and_subscribe_ack_in_full_store_does_not_wait() {
-        let mut list = WaitingList::new(test_repository(1), 1);
+        let mut list = WaitingList::new(test_repository(1), unlimited_clients(1));
         list.store("unacked", message("first"), TTL, alice())
             .unwrap();
 
@@ -674,7 +736,7 @@ mod tests {
 
         assert!(matches!(result, Err(WaitingListError::StoreFull)));
         // The rejected producer holds no waiting-ID slot.
-        assert!(list.get_or_subscribe("other").is_ok());
+        assert!(list.get_or_subscribe("other", alice()).is_ok());
     }
 
     // ========== Waiter limits ==========
@@ -683,10 +745,10 @@ mod tests {
     fn message_waiters_per_id_are_limited() {
         let mut list = list(10);
         let _receivers: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
-            .map(|_| list.get_or_subscribe("id").unwrap())
+            .map(|_| list.get_or_subscribe("id", alice()).unwrap())
             .collect();
 
-        assert!(is_limit(list.get_or_subscribe("id")));
+        assert!(is_limit(list.get_or_subscribe("id", alice())));
     }
 
     #[test]
@@ -694,10 +756,10 @@ mod tests {
         let mut list = list(10);
         list.store("id", message("hello"), TTL, alice()).unwrap();
         let _receivers: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
-            .map(|_| list.subscribe_ack("id").unwrap())
+            .map(|_| list.subscribe_ack("id", alice()).unwrap())
             .collect();
 
-        assert!(is_limit(list.subscribe_ack("id")));
+        assert!(is_limit(list.subscribe_ack("id", alice())));
     }
 
     #[test]
@@ -707,40 +769,40 @@ mod tests {
         let mut list = list(10);
         list.store("acked", message("hello"), TTL, alice()).unwrap();
         for _ in 0..MAX_WAITERS_PER_ENTRY {
-            drop(list.get_or_subscribe("waiting").unwrap());
-            drop(list.subscribe_ack("acked").unwrap());
+            drop(list.get_or_subscribe("waiting", alice()).unwrap());
+            drop(list.subscribe_ack("acked", alice()).unwrap());
         }
 
-        assert!(list.get_or_subscribe("waiting").is_ok());
-        assert!(list.subscribe_ack("acked").is_ok());
+        assert!(list.get_or_subscribe("waiting", alice()).is_ok());
+        assert!(list.subscribe_ack("acked", alice()).is_ok());
     }
 
     #[test]
     fn new_id_beyond_waiting_id_limit_is_rejected() {
         // Regression test: unique IDs must not grow the waiter map without bound.
         let mut list = list(2);
-        let _waiting_a = list.get_or_subscribe("a").unwrap();
-        let _waiting_b = list.get_or_subscribe("b").unwrap();
+        let _waiting_a = list.get_or_subscribe("a", alice()).unwrap();
+        let _waiting_b = list.get_or_subscribe("b", alice()).unwrap();
 
-        assert!(is_limit(list.get_or_subscribe("c")));
+        assert!(is_limit(list.get_or_subscribe("c", alice())));
     }
 
     #[test]
     fn existing_id_accepts_waiters_at_waiting_id_limit() {
         let mut list = list(2);
-        let _waiting_a = list.get_or_subscribe("a").unwrap();
-        let _waiting_b = list.get_or_subscribe("b").unwrap();
+        let _waiting_a = list.get_or_subscribe("a", alice()).unwrap();
+        let _waiting_b = list.get_or_subscribe("b", alice()).unwrap();
 
-        assert!(list.get_or_subscribe("a").is_ok());
+        assert!(list.get_or_subscribe("a", alice()).is_ok());
     }
 
     #[test]
     fn new_id_reuses_slot_of_disconnected_waiters() {
         let mut list = list(2);
-        let _waiting_a = list.get_or_subscribe("a").unwrap();
-        drop(list.get_or_subscribe("b").unwrap());
+        let _waiting_a = list.get_or_subscribe("a", alice()).unwrap();
+        drop(list.get_or_subscribe("b", alice()).unwrap());
 
-        assert!(list.get_or_subscribe("c").is_ok());
+        assert!(list.get_or_subscribe("c", alice()).is_ok());
     }
 
     #[test]
@@ -748,11 +810,118 @@ mod tests {
         // Regression test: a flood of new IDs at a full map must not run a full
         // prune per request while holding the global lock.
         let mut list = list(2);
-        let _waiting_a = list.get_or_subscribe("a").unwrap();
-        drop(list.get_or_subscribe("b").unwrap());
-        drop(list.get_or_subscribe("c").expect("prune frees b"));
+        let _waiting_a = list.get_or_subscribe("a", alice()).unwrap();
+        drop(list.get_or_subscribe("b", alice()).unwrap());
+        drop(list.get_or_subscribe("c", alice()).expect("prune frees b"));
 
-        assert!(is_limit(list.get_or_subscribe("d")));
+        assert!(is_limit(list.get_or_subscribe("d", alice())));
+    }
+
+    // ========== Waiting requests per client ==========
+
+    fn list_with_client_limit(max_requests_per_client: usize) -> WaitingList {
+        let limits = WaitingLimits {
+            max_ids: 100,
+            max_requests_per_client,
+        };
+        WaitingList::new(test_repository(100), limits)
+    }
+
+    fn is_client_limit<T>(result: Result<T, WaitingListError>) -> bool {
+        matches!(result, Err(WaitingListError::ClientWaitLimitReached))
+    }
+
+    #[test]
+    fn message_waiters_per_client_are_limited() {
+        let mut list = list_with_client_limit(2);
+        let _first = list.get_or_subscribe("a", alice()).unwrap();
+        let _second = list.get_or_subscribe("b", alice()).unwrap();
+
+        assert!(is_client_limit(list.get_or_subscribe("c", alice())));
+        assert!(list.get_or_subscribe("c", bob()).is_ok());
+    }
+
+    #[test]
+    fn ack_waiters_count_toward_the_client_limit() {
+        let mut list = list_with_client_limit(1);
+        list.store("a", message("hello"), TTL, bob()).unwrap();
+        let _waiting = list.get_or_subscribe("b", alice()).unwrap();
+
+        assert!(is_client_limit(list.subscribe_ack("a", alice())));
+    }
+
+    #[cfg(feature = "link-compat")]
+    #[test]
+    fn link_consumers_count_toward_the_client_limit() {
+        let mut list = list_with_client_limit(1);
+        let _waiting = list.get_or_subscribe("a", alice()).unwrap();
+
+        assert!(is_client_limit(list.take_or_subscribe("b", alice())));
+    }
+
+    #[cfg(feature = "link-compat")]
+    #[test]
+    fn link_producer_over_the_client_limit_does_not_store() {
+        let mut list = list_with_client_limit(1);
+        let _waiting = list.get_or_subscribe("a", alice()).unwrap();
+
+        let result = list.store_and_subscribe_ack("b", message("hello"), TTL, alice());
+
+        assert!(is_client_limit(result));
+        assert_eq!(list.is_acked("b").unwrap(), None);
+    }
+
+    #[test]
+    fn stored_message_is_returned_to_a_client_at_its_limit() {
+        let mut list = list_with_client_limit(1);
+        list.store("stored", message("hello"), TTL, bob()).unwrap();
+        let _waiting = list.get_or_subscribe("a", alice()).unwrap();
+
+        let delivery = list.get_or_subscribe("stored", alice()).unwrap();
+
+        assert_eq!(ready(delivery), message("hello"));
+    }
+
+    #[test]
+    fn ended_wait_frees_its_slot() {
+        // A client that disconnects and reconnects must not be blocked by its
+        // own earlier request, even before the waiter map is pruned.
+        let mut list = list_with_client_limit(1);
+        drop(list.get_or_subscribe("a", alice()).unwrap());
+
+        assert!(list.get_or_subscribe("a", alice()).is_ok());
+    }
+
+    #[test]
+    fn waiter_rejected_per_id_frees_its_slot() {
+        let mut list = list_with_client_limit(MAX_WAITERS_PER_ENTRY + 1);
+        let _waiting: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
+            .map(|_| list.get_or_subscribe("id", alice()).unwrap())
+            .collect();
+        assert!(is_limit(list.get_or_subscribe("id", alice())));
+
+        assert!(list.get_or_subscribe("other", alice()).is_ok());
+    }
+
+    #[test]
+    fn stored_messages_and_waiting_requests_are_counted_separately() {
+        let repository = test_repository_with_capacity(Capacity {
+            max_entries: 100,
+            max_entries_per_client: 1,
+        });
+        let limits = WaitingLimits {
+            max_ids: 100,
+            max_requests_per_client: 1,
+        };
+        let mut list = WaitingList::new(repository, limits);
+        list.store("stored", message("hello"), TTL, alice())
+            .unwrap();
+
+        let _waiting = list.get_or_subscribe("a", alice()).unwrap();
+        assert!(matches!(
+            list.store("other", message("hello"), TTL, alice()),
+            Err(WaitingListError::ClientLimitReached { .. })
+        ));
     }
 
     // ========== remove_expired ==========
@@ -761,7 +930,7 @@ mod tests {
     async fn remove_expired_keeps_waiters_without_entry() {
         // Regression test: consumer arrives before producer, cleanup must not drop the waiter
         let mut list = list(10);
-        let receiver = pending(list.get_or_subscribe("id").unwrap());
+        let receiver = pending(list.get_or_subscribe("id", alice()).unwrap());
 
         list.remove_expired().unwrap();
         list.store("id", message("delayed"), TTL, alice()).unwrap();
@@ -780,8 +949,8 @@ mod tests {
         )
         .unwrap();
         list.store("stays", message("hello"), TTL, alice()).unwrap();
-        let expiring = pending(list.subscribe_ack("expires").unwrap().unwrap());
-        let staying = pending(list.subscribe_ack("stays").unwrap().unwrap());
+        let expiring = pending(list.subscribe_ack("expires", alice()).unwrap().unwrap());
+        let staying = pending(list.subscribe_ack("stays", alice()).unwrap().unwrap());
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         assert_eq!(list.remove_expired().unwrap(), 1);
@@ -799,7 +968,7 @@ mod tests {
         list.store("id", message("first"), Duration::from_millis(200), alice())
             .unwrap();
         list.ack("id").unwrap();
-        let receiver = pending(list.get_or_subscribe("id").unwrap());
+        let receiver = pending(list.get_or_subscribe("id", alice()).unwrap());
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         assert_eq!(list.remove_expired().unwrap(), 1);
@@ -811,12 +980,12 @@ mod tests {
     #[test]
     fn remove_expired_frees_ids_without_open_waiters() {
         let mut list = list(1);
-        drop(list.get_or_subscribe("a").unwrap());
-        drop(list.get_or_subscribe("b").expect("prune frees a"));
-        assert!(is_limit(list.get_or_subscribe("c")));
+        drop(list.get_or_subscribe("a", alice()).unwrap());
+        drop(list.get_or_subscribe("b", alice()).expect("prune frees a"));
+        assert!(is_limit(list.get_or_subscribe("c", alice())));
 
         list.remove_expired().unwrap();
 
-        assert!(list.get_or_subscribe("c").is_ok());
+        assert!(list.get_or_subscribe("c", alice()).is_ok());
     }
 }

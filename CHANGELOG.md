@@ -15,11 +15,20 @@ All notable changes are documented here. The format is based on
   client is the TCP peer, as before. See
   [How the relay identifies clients](DEPLOY.md#how-the-relay-identifies-clients).
 - `--max-entries-per-client` and `HttpRelayBuilder::max_entries_per_client`,
-  100 by default: the unACKed messages one client can have stored. A client is
-  an IPv4 address or an IPv6 /56 network. Further `POST`s to `/inbox/{id}` and
-  `/link/{id}` get `429 Too Many Requests` with a `Retry-After` header.
-  Replacing one of the client's unACKed messages is always allowed. The limit
-  must be at least 1; to turn it off, set it higher than `--max-entries`. See
+  100 by default. A client is an IPv4 address or an IPv6 /56 network. It
+  limits two things per client, counted separately:
+  - The unACKed messages the client can have stored. Further `POST`s to
+    `/inbox/{id}` and `/link/{id}` get `429 Too Many Requests` with a
+    `Retry-After` header. Replacing one of the client's unACKed messages is
+    always allowed.
+  - The requests the client can have waiting: long-poll `GET`s, `/await`, and
+    `/link` requests. Further ones get `429 Too Many Requests`, and a rejected
+    `POST /link/{id}` stores nothing. A `GET` for a message that is already
+    stored isn't limited. Without this limit, a few clients could take every
+    slot for waiting IDs, and everyone else's requests for new IDs would get
+    `503`.
+
+  The limit must be at least 1. See
   [Limits per client](DEPLOY.md#limits-per-client).
 - `DEPLOY.md`: what a production relay requires from its reverse proxy, an
   Nginx setup, running behind a CDN, and the known gaps in the limits per

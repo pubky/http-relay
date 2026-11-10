@@ -45,8 +45,16 @@ async fn post_message(
 }
 
 /// GET /inbox/{id} - Return the message, or wait up to `inbox_timeout` for one.
-async fn get_message(Id(id): Id, State(state): State<AppState>) -> Result<Message, RelayError> {
-    let delivery = state.waiting_list.lock().await.get_or_subscribe(&id)?;
+async fn get_message(
+    Id(id): Id,
+    State(state): State<AppState>,
+    Extension(client_ip): Extension<ClientIp>,
+) -> Result<Message, RelayError> {
+    let delivery = state
+        .waiting_list
+        .lock()
+        .await
+        .get_or_subscribe(&id, client_ip.network())?;
     wait_for(delivery, state.config.inbox_timeout).await
 }
 
@@ -69,12 +77,16 @@ async fn ack_status(Id(id): Id, State(state): State<AppState>) -> Result<&'stati
 }
 
 /// GET /inbox/{id}/await - Wait up to `inbox_timeout` for the ACK.
-async fn await_ack(Id(id): Id, State(state): State<AppState>) -> Result<(), RelayError> {
+async fn await_ack(
+    Id(id): Id,
+    State(state): State<AppState>,
+    Extension(client_ip): Extension<ClientIp>,
+) -> Result<(), RelayError> {
     let delivery = state
         .waiting_list
         .lock()
         .await
-        .subscribe_ack(&id)?
+        .subscribe_ack(&id, client_ip.network())?
         .ok_or(RelayError::NotFound)?;
     wait_for(delivery, state.config.inbox_timeout).await
 }
@@ -511,5 +523,38 @@ mod tests {
 
         assert_eq!(same_56.status_code(), 429);
         assert_eq!(next_56.status_code(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_waiting_requests_over_client_limit_get_429_until_one_ends() {
+        let server = test_server(Config {
+            max_entries_per_client: 1,
+            inbox_timeout: Duration::from_millis(300),
+            trusted_proxies: vec!["127.0.0.1/32".parse().unwrap()],
+            ..Config::default()
+        });
+        let get_as = |client_ip: &'static str, path: &'static str| {
+            server.get(path).add_header("X-Forwarded-For", client_ip)
+        };
+
+        let waiting = get_as("198.51.100.1", "/inbox/a");
+        let rejected = async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let rejected = get_as("198.51.100.1", "/inbox/b").await;
+            let other_client = get_as("198.51.100.2", "/inbox/c").await;
+            (rejected, other_client)
+        };
+        let (waiting, (rejected, other_client)) = tokio::join!(waiting, rejected);
+
+        assert_eq!(waiting.status_code(), 408);
+        assert_eq!(rejected.status_code(), 429);
+        assert_eq!(
+            rejected.text(),
+            "Too many waiting requests from this client"
+        );
+        assert!(rejected.maybe_header("retry-after").is_none());
+        assert_eq!(other_client.status_code(), 408);
+        // The first wait ended, so the client may wait again.
+        assert_eq!(get_as("198.51.100.1", "/inbox/b").await.status_code(), 408);
     }
 }

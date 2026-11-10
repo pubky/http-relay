@@ -80,7 +80,7 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--link-timeout <SECS>` | Link endpoint timeout | `600` |
 | `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
 | `--max-entries <N>` | Max stored entries, and max IDs with waiting requests. When the store is full, expired and ACKed entries make room; if there are none, `POST` to a new ID returns `503` | `10000` |
-| `--max-entries-per-client <N>` | Max unACKed messages one client can have stored; further `POST`s return `429`. A client is an IPv4 address or an IPv6 /56 network | `100` |
+| `--max-entries-per-client <N>` | Max unACKed messages one client can have stored, and max requests it can have waiting; counted separately. Further requests return `429`. A client is an IPv4 address or an IPv6 /56 network | `100` |
 | `--persist-db <PATH>` | SQLite database path for persistence (`persist` feature) | (in-memory) |
 | `--cors-allow-all` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) | off |
 | `--trusted-proxy <CIDR>` | Identify clients behind this proxy by `X-Forwarded-For`. Repeatable. See [DEPLOY.md](DEPLOY.md) | off (TCP peer) |
@@ -168,6 +168,9 @@ curl http://localhost:8080/inbox/my-channel
 **Responses:**
 - `200 OK` - Returns message with original Content-Type
 - `408 Request Timeout` - No message arrived within timeout (25s default)
+- `429 Too Many Requests` - No message is stored, and this client already has
+  the maximum number of waiting requests (`--max-entries-per-client`). Retry
+  after one of them ends.
 - `503 Service Unavailable` - Too many requests already wait for this ID, or
   too many IDs have waiting requests
 
@@ -209,6 +212,8 @@ curl http://localhost:8080/inbox/my-channel/await
 - `200 OK` - Consumer ACKed the message
 - `404 Not Found` - No message exists, or it expired or was replaced while waiting
 - `408 Request Timeout` - No ACK received within timeout (default 25s)
+- `429 Too Many Requests` - This client already has the maximum number of
+  waiting requests (`--max-entries-per-client`)
 - `503 Service Unavailable` - Too many requests already wait for this ACK
 
 All endpoints answer `400 Bad Request` with `ID too long` if the ID is longer
@@ -268,6 +273,10 @@ backwards compatibility but not recommended for new integrations.
 |--------|----------|-------------|
 | `POST` | `/link/{id}` | Send message, block until consumer retrieves (10 min timeout) |
 | `GET` | `/link/{id}` | Retrieve message, block until producer sends (10 min timeout) |
+
+Both count as waiting requests toward `--max-entries-per-client`: over the
+limit, they get `429 Too Many Requests`, and a rejected `POST` stores nothing.
+A `GET` for a message that is already there doesn't wait and isn't limited.
 
 **Why prefer `/inbox`:** The `/link` endpoint has no ACK mechanism—if the consumer
 disconnects after receiving data, the producer still gets `200 OK`. The 10-minute

@@ -93,10 +93,14 @@ impl IntoResponse for Message {
 /// A value sent while the timeout fires is still returned. The waiting list
 /// treats a successful send as delivered (a link producer gets its ACK), so
 /// dropping that value would lose the message.
+///
+/// The request counts against its client's limit of waiting requests until
+/// this returns or its future is dropped (the client disconnected).
 pub(crate) async fn wait_for<T>(delivery: Delivery<T>, timeout: Duration) -> Result<T, RelayError> {
-    let mut receiver = match delivery {
+    // A named binding, not `_`: the permit must live until the wait ends.
+    let (mut receiver, _permit) = match delivery {
         Delivery::Ready(value) => return Ok(value),
-        Delivery::Pending(receiver) => receiver,
+        Delivery::Pending(receiver, permit) => (receiver, permit),
     };
     match tokio::time::timeout(timeout, &mut receiver).await {
         Ok(Ok(value)) => Ok(value),
@@ -122,6 +126,8 @@ pub(crate) enum RelayError {
     NotFound,
     Timeout,
     TooManyWaiters,
+    /// The client already has as many open waiting requests as it may.
+    TooManyWaitingRequests,
     /// The client already has as many unACKed messages stored as it may. One
     /// of them expires after `retry_after`.
     ClientLimitReached {
@@ -142,6 +148,7 @@ impl From<WaitingListError> for RelayError {
     fn from(error: WaitingListError) -> Self {
         match error {
             WaitingListError::WaiterLimitReached => Self::TooManyWaiters,
+            WaitingListError::ClientWaitLimitReached => Self::TooManyWaitingRequests,
             WaitingListError::ClientLimitReached { retry_after } => {
                 Self::ClientLimitReached { retry_after }
             }
@@ -160,6 +167,12 @@ impl IntoResponse for RelayError {
             Self::TooManyWaiters => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Too many concurrent requests",
+            ),
+            // No Retry-After: nothing tells when one of the client's waiting
+            // requests ends.
+            Self::TooManyWaitingRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Too many waiting requests from this client",
             ),
             Self::ClientLimitReached { retry_after } => {
                 // Rounded up, so clients that wait this long find room.
@@ -186,6 +199,14 @@ mod tests {
     use axum::body::to_bytes;
 
     use super::*;
+    use crate::storage::test_client;
+    use crate::waiting_clients::{WaitPermit, WaitingClients};
+
+    fn permit() -> WaitPermit {
+        WaitingClients::new(1)
+            .try_start(test_client("198.51.100.1"))
+            .unwrap()
+    }
 
     #[tokio::test]
     async fn storage_error_is_500_without_details() {
@@ -203,7 +224,11 @@ mod tests {
         let (sender, receiver) = oneshot::channel::<()>();
         drop(sender);
 
-        let result = wait_for(Delivery::Pending(receiver), Duration::from_secs(1)).await;
+        let result = wait_for(
+            Delivery::Pending(receiver, permit()),
+            Duration::from_secs(1),
+        )
+        .await;
 
         assert!(matches!(result, Err(RelayError::NotFound)));
     }
@@ -224,7 +249,7 @@ mod tests {
     async fn timeout_without_value_fails_later_sends() {
         let (sender, receiver) = oneshot::channel::<()>();
 
-        let result = wait_for(Delivery::Pending(receiver), Duration::ZERO).await;
+        let result = wait_for(Delivery::Pending(receiver, permit()), Duration::ZERO).await;
 
         assert!(matches!(result, Err(RelayError::Timeout)));
         assert!(sender.send(()).is_err());
