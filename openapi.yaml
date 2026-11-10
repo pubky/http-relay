@@ -456,7 +456,7 @@ components:
     ClientWaitingLimitReached:
       description: |
         This client already has the maximum number of waiting requests
-        (`--max-entries-per-client`, 100 by default). Waiting requests are
+        (`--max-waiting-per-client`, 100 by default). Waiting requests are
         `GET /inbox/{id}`, `GET /inbox/{id}/await`, and both `/link/{id}`
         methods. A client is an IPv4 address or an IPv6 /56 network. Retry
         after one of the client's waiting requests ends. A `GET` for a message

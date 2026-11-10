@@ -66,9 +66,10 @@ pub(crate) struct Config {
     pub max_body_size: usize,
     /// Maximum stored entries, and maximum IDs with waiting requests.
     pub max_entries: usize,
-    /// Maximum live unACKed entries stored by one client, and maximum open
-    /// waiting requests of one client.
+    /// Maximum live unACKed entries stored by one client.
     pub max_entries_per_client: usize,
+    /// Maximum open waiting requests of one client.
+    pub max_waiting_per_client: usize,
     /// Path to SQLite database for persistent storage.
     /// If None, uses in-memory storage (data lost on restart).
     #[cfg(feature = "persist")]
@@ -91,6 +92,7 @@ impl Default for Config {
             max_body_size: HttpRelayBuilder::DEFAULT_MAX_BODY_SIZE,
             max_entries: HttpRelayBuilder::DEFAULT_MAX_ENTRIES,
             max_entries_per_client: HttpRelayBuilder::DEFAULT_MAX_ENTRIES_PER_CLIENT,
+            max_waiting_per_client: HttpRelayBuilder::DEFAULT_MAX_WAITING_PER_CLIENT,
             #[cfg(feature = "persist")]
             persist_db: None,
             cors_allow_all: false,
@@ -140,6 +142,8 @@ impl HttpRelayBuilder {
     pub const DEFAULT_MAX_ENTRIES: usize = 10_000;
     /// Default for [`Self::max_entries_per_client`].
     pub const DEFAULT_MAX_ENTRIES_PER_CLIENT: usize = 100;
+    /// Default for [`Self::max_waiting_per_client`].
+    pub const DEFAULT_MAX_WAITING_PER_CLIENT: usize = 100;
 
     /// Configure the address to bind to (default: 127.0.0.1).
     pub fn bind_address(mut self, addr: IpAddr) -> Self {
@@ -191,26 +195,34 @@ impl HttpRelayBuilder {
         self
     }
 
-    /// Configure the maximum unACKed messages one client can have stored, and
-    /// the maximum requests it can have waiting (default: 100). The two are
-    /// counted separately.
-    ///
-    /// - `POST` of a further message gets `429 Too Many Requests`, until one
-    ///   of the client's messages is ACKed or expires. Replacing one of the
-    ///   client's unACKed messages is always allowed.
-    /// - A further request that would wait gets `429 Too Many Requests`,
-    ///   until one of the client's waiting requests ends. Waiting requests are
-    ///   `GET /inbox/{id}`, `GET /inbox/{id}/await`, and both `/link/{id}`
-    ///   methods. A `GET` for a message that is already stored doesn't wait, so
-    ///   the limit doesn't apply to it.
+    /// Configure the maximum unACKed messages one client can have stored
+    /// (default: 100). `POST` of a further message gets `429 Too Many
+    /// Requests`, until one of the client's messages is ACKed or expires.
+    /// Replacing one of the client's unACKed messages is always allowed.
     ///
     /// A client is an IPv4 address or an IPv6 /56 network; see
     /// [`Self::trusted_proxies`] for how the relay finds it. At
-    /// [`Self::max_entries`] or higher, one client can take every stored entry
-    /// and every slot for waiting IDs. Must be at least 1; otherwise
-    /// [`Self::run`] fails.
+    /// [`Self::max_entries`] or higher, one client can fill the store. Must be
+    /// at least 1; otherwise [`Self::run`] fails.
     pub fn max_entries_per_client(mut self, max: usize) -> Self {
         self.0.max_entries_per_client = max;
+        self
+    }
+
+    /// Configure the maximum requests one client can have waiting (default:
+    /// 100). A further request that would wait gets `429 Too Many Requests`,
+    /// until one of the client's waiting requests ends. Counted separately from
+    /// [`Self::max_entries_per_client`].
+    ///
+    /// Waiting requests are `GET /inbox/{id}`, `GET /inbox/{id}/await`, and
+    /// both `/link/{id}` methods. A `GET` for a message that is already stored
+    /// doesn't wait, so the limit doesn't apply to it.
+    ///
+    /// Clients are grouped as for [`Self::max_entries_per_client`]. At
+    /// [`Self::max_entries`] or higher, one client can take every slot for
+    /// waiting IDs. Must be at least 1; otherwise [`Self::run`] fails.
+    pub fn max_waiting_per_client(mut self, max: usize) -> Self {
+        self.0.max_waiting_per_client = max;
         self
     }
 
@@ -292,7 +304,7 @@ fn build_router(state: AppState) -> Router {
 fn app_state(config: Config) -> Result<AppState> {
     let limits = WaitingLimits {
         max_ids: config.max_entries,
-        max_requests_per_client: config.max_entries_per_client,
+        max_requests_per_client: config.max_waiting_per_client,
     };
     let waiting_list = WaitingList::new(config.open_storage()?, limits);
     Ok(AppState {
@@ -333,10 +345,14 @@ pub struct HttpRelay {
 
 impl HttpRelay {
     async fn start(config: Config) -> Result<Self> {
-        // A limit of 0 would reject every POST and every waiting request.
+        // A limit of 0 would reject every POST, or every waiting request.
         anyhow::ensure!(
             config.max_entries_per_client > 0,
             "max_entries_per_client must be at least 1"
+        );
+        anyhow::ensure!(
+            config.max_waiting_per_client > 0,
+            "max_waiting_per_client must be at least 1"
         );
         if !config.trusted_proxies.is_empty() {
             tracing::info!(
@@ -425,6 +441,17 @@ mod tests {
         let result = HttpRelayBuilder::default()
             .http_port(0)
             .max_entries_per_client(0)
+            .run()
+            .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_run_rejects_a_waiting_limit_of_zero() {
+        let result = HttpRelayBuilder::default()
+            .http_port(0)
+            .max_waiting_per_client(0)
             .run()
             .await;
 

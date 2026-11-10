@@ -528,7 +528,7 @@ mod tests {
     #[tokio::test]
     async fn test_waiting_requests_over_client_limit_get_429_until_one_ends() {
         let server = test_server(Config {
-            max_entries_per_client: 1,
+            max_waiting_per_client: 1,
             inbox_timeout: Duration::from_millis(300),
             trusted_proxies: vec!["127.0.0.1/32".parse().unwrap()],
             ..Config::default()

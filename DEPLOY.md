@@ -74,17 +74,17 @@ is then logged with a `client_ip` field.
 
 `--max-entries` limits two things that all clients share: stored entries, and
 IDs with waiting requests. When either is full, requests for a new ID get `503`.
-To keep a single client from filling them, `--max-entries-per-client`, 100 by
-default, sets two limits for each client. They are counted separately, so with
-the defaults a client can have 100 messages stored and 100 requests waiting at
-the same time.
+To keep a single client from filling them, the relay sets two limits for each
+client, 100 by default each. They are counted separately, so with the defaults
+a client can have 100 messages stored and 100 requests waiting at the same
+time.
 
-- **Stored unACKed messages:** a stored message counts until its consumer ACKs
-  it or it expires. Further `POST` requests to `/inbox/{id}` and `/link/{id}`
+- **Stored unACKed messages (`--max-entries-per-client`):** a stored message
+  counts until its consumer ACKs it or it expires. Further `POST` requests to `/inbox/{id}` and `/link/{id}`
   get `429 Too Many Requests` with a `Retry-After` header. Replacing one of the
   client's unACKed messages is still allowed.
-- **Waiting requests:** a request that waits counts until it ends with a
-  response, a timeout, or a disconnect. These are `GET /inbox/{id}`,
+- **Waiting requests (`--max-waiting-per-client`):** a request that waits
+  counts until it ends with a response, a timeout, or a disconnect. These are `GET /inbox/{id}`,
   `GET /inbox/{id}/await`, and both `/link/{id}` methods. Further waiting
   requests get `429 Too Many Requests` without a `Retry-After` header, and a
   rejected `POST /link/{id}` stores nothing. A `GET` for a message that is
@@ -92,19 +92,23 @@ the same time.
   network drops without closing the connection, its request still counts until
   the relay notices: at the latest, when the request times out.
 
-Keep the following in mind when you choose the limit:
+Keep the following in mind when you choose the limits:
 
 - **What counts as one client:** an IPv4 address, or an IPv6 /56 network. ISPs
   usually give each customer at least a /56, so a limit per IPv6 address would
   be easy to get around.
 - **Shared addresses:** many users can share one IPv4 address, for example
   behind carrier-grade NAT. Each user normally has only a few unACKed messages
-  and waiting requests at a time, so the default leaves room for many users per
-  address. Raise `--max-entries-per-client` if your users' clients get `429`.
-  At `--max-entries` or higher, the limit no longer protects anything: one
-  client can fill the store and take every slot for waiting IDs.
-- **What the limit doesn't cover:** clients with many addresses can still fill
-  the store together. The limit raises the cost: with the defaults, filling the
+  and waiting requests at a time, so the defaults leave room for many users per
+  address. If your users' clients get `429`, raise the limit that the response
+  body names: `--max-entries-per-client` for `Too many unacknowledged messages
+  from this client`, `--max-waiting-per-client` for `Too many waiting requests
+  from this client`. A server that long-polls many IDs from one address may
+  need a higher `--max-waiting-per-client` on its own. At `--max-entries` or
+  higher, a limit no longer protects anything: one client can fill the store,
+  or take every slot for waiting IDs.
+- **What the limits don't cover:** clients with many addresses can still fill
+  the store together. The limits raise the cost: with the defaults, filling the
   store takes 100 IPv4 addresses or IPv6 /56 networks. IPv6 networks are cheap,
   though: a /48, which some ISPs and free tunnel brokers hand out, holds 256
   /56 networks. One holder of a /48 can fill the store, or take every slot
