@@ -213,7 +213,9 @@ curl http://localhost:8080/inbox/my-channel/await
 
 All endpoints answer `400 Bad Request` with `ID too long` if the ID is longer
 than 256 bytes, and `500 Internal Server Error` with `Storage error` if the
-relay can't read or write its storage. Error bodies are short `text/plain`
+relay can't read or write its storage. With `--trusted-proxy`, requests from a
+trusted proxy without a valid `X-Forwarded-For` header get `400 Bad Request`
+with `Invalid X-Forwarded-For header`; see [DEPLOY.md](DEPLOY.md). Error bodies are short `text/plain`
 messages.
 
 ### Typical Flow

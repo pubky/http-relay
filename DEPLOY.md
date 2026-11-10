@@ -89,9 +89,16 @@ messages is still allowed.
   limit off, set it higher than `--max-entries`.
 - **What the limit doesn't cover:** clients with many addresses can still fill
   the store together. The limit raises the cost: with the defaults, filling the
-  store takes 100 addresses or /56 networks. The relay doesn't limit request
-  rates or long-poll requests per client; use the proxy's connection and rate
-  limits for those.
+  store takes 100 IPv4 addresses or IPv6 /56 networks. IPv6 networks are cheap,
+  though: a /48, which some ISPs and free tunnel brokers hand out, holds 256
+  /56 networks. One holder of a /48 can fill the store with the defaults.
+- **Long-poll requests:** the limit only counts stored messages. A `GET` that
+  waits for a new ID takes one of the `--max-entries` slots for IDs with
+  waiting requests, and the relay doesn't limit these per client. When all
+  slots are taken, long-poll requests and `/link` requests for new IDs get
+  `503`. The relay doesn't limit request rates per client either. Use the
+  proxy's connection and rate limits for both, and see the note on IPv6 in
+  [Run behind Nginx](#run-behind-nginx).
 
 With `--persist-db`, the database stores a keyed hash of each message's client,
 not its IP address. The key is random and isn't saved, so after a restart, the
@@ -151,6 +158,12 @@ Notes:
   `listen 443 ssl http2;` instead.
 - To also rate-limit requests per client, add a `limit_req_zone` and a
   `limit_req` directive.
+- `$binary_remote_addr` is the full client address. Over IPv4 that is one
+  host, but an IPv6 host usually has a whole /64 and can use a new address for
+  each connection, so `limit_conn` doesn't limit it. Nginx can't group IPv6
+  addresses by network itself. If abuse over IPv6 is a concern, limit
+  connections per network in front of Nginx, for example in a firewall or a
+  CDN.
 - If the relay runs in a container, trust the address Nginx connects from, such
   as the Docker bridge gateway, instead of `127.0.0.1`. If you publish the
   relay's port, publish it on the loopback address only, for example

@@ -27,7 +27,7 @@ info:
     ## Errors
 
     Error responses have a short `text/plain` body: `ID too long` (400),
-    `Not found` (404), `Request timed out` (408), `Too many unacknowledged
+    `Invalid X-Forwarded-For header` (400), `Not found` (404), `Request timed out` (408), `Too many unacknowledged
     messages from this client` (429), `Too many concurrent requests` (503),
     `Server at capacity` (503) or `Storage error` (500).
   version: 0.6.0
@@ -61,7 +61,7 @@ paths:
         '200':
           description: Message stored successfully
         '400':
-          $ref: '#/components/responses/IdTooLong'
+          $ref: '#/components/responses/BadRequest'
         '429':
           $ref: '#/components/responses/ClientLimitReached'
         '500':
@@ -92,7 +92,7 @@ paths:
         '200':
           $ref: '#/components/responses/InboxMessage'
         '400':
-          $ref: '#/components/responses/IdTooLong'
+          $ref: '#/components/responses/BadRequest'
         '408':
           description: No message arrived within timeout (25s default)
         '500':
@@ -116,7 +116,7 @@ paths:
         '200':
           description: Message acknowledged and removed
         '400':
-          $ref: '#/components/responses/IdTooLong'
+          $ref: '#/components/responses/BadRequest'
         '404':
           description: No message to acknowledge (not posted yet, or expired)
         '500':
@@ -152,7 +152,7 @@ paths:
                   - 'false'
               example: 'false'
         '400':
-          $ref: '#/components/responses/IdTooLong'
+          $ref: '#/components/responses/BadRequest'
         '404':
           description: No message exists for this ID
         '500':
@@ -178,7 +178,7 @@ paths:
         '200':
           description: Message was acknowledged
         '400':
-          $ref: '#/components/responses/IdTooLong'
+          $ref: '#/components/responses/BadRequest'
         '404':
           description: No message exists, or it expired or was replaced while waiting
         '408':
@@ -206,7 +206,7 @@ paths:
         '200':
           $ref: '#/components/responses/MessageReceived'
         '400':
-          $ref: '#/components/responses/IdTooLong'
+          $ref: '#/components/responses/BadRequest'
         '408':
           $ref: '#/components/responses/Timeout'
         '500':
@@ -235,7 +235,7 @@ paths:
         '404':
           description: Another producer replaced the message before a consumer received it
         '400':
-          $ref: '#/components/responses/IdTooLong'
+          $ref: '#/components/responses/BadRequest'
         '408':
           $ref: '#/components/responses/Timeout'
         '429':
@@ -378,13 +378,20 @@ components:
             type: string
           example: Request timed out
 
-    IdTooLong:
-      description: The ID is longer than 256 bytes
+    BadRequest:
+      description: |
+        The ID is longer than 256 bytes (`ID too long`), or the request comes
+        from a trusted proxy (`--trusted-proxy`) without a valid
+        `X-Forwarded-For` header (`Invalid X-Forwarded-For header`).
       content:
         text/plain:
           schema:
             type: string
-          example: ID too long
+          examples:
+            idTooLong:
+              value: ID too long
+            invalidForwardedFor:
+              value: Invalid X-Forwarded-For header
 
     TooManyWaiters:
       description: |
