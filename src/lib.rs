@@ -19,6 +19,7 @@ mod inbox;
 mod link;
 mod server;
 mod storage;
+mod wait_permits;
 mod waiting_list;
 
 pub use server::{HttpRelay, HttpRelayBuilder};

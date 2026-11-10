@@ -55,6 +55,16 @@ struct Args {
     )]
     max_entries_per_client: NonZeroUsize,
 
+    /// Maximum requests one client (IPv4 address or IPv6 /56) can have
+    /// waiting: inbox GET and /await, and link GET and POST. Further ones get
+    /// 429
+    #[arg(
+        long,
+        default_value_t = NonZeroUsize::new(HttpRelayBuilder::DEFAULT_MAX_WAITING_PER_CLIENT)
+            .expect("the default is not zero")
+    )]
+    max_waiting_per_client: NonZeroUsize,
+
     /// Path to SQLite database for persistent storage.
     /// If not specified, uses in-memory storage (data lost on restart).
     #[cfg(feature = "persist")]
@@ -94,6 +104,7 @@ async fn main() -> Result<()> {
         .max_body_size(args.max_body_size)
         .max_entries(args.max_entries)
         .max_entries_per_client(args.max_entries_per_client.get())
+        .max_waiting_per_client(args.max_waiting_per_client.get())
         .cors_allow_all(args.cors_allow_all)
         .trusted_proxies(args.trusted_proxy);
     #[cfg(feature = "persist")]

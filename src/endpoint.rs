@@ -93,10 +93,14 @@ impl IntoResponse for Message {
 /// A value sent while the timeout fires is still returned. The waiting list
 /// treats a successful send as delivered (a link producer gets its ACK), so
 /// dropping that value would lose the message.
+///
+/// Holds the request's wait permit until it returns, or until the future is
+/// dropped because the client disconnected.
 pub(crate) async fn wait_for<T>(delivery: Delivery<T>, timeout: Duration) -> Result<T, RelayError> {
-    let mut receiver = match delivery {
+    // Bound to a name, not `_`, which would drop the permit right here.
+    let (mut receiver, _permit) = match delivery {
         Delivery::Ready(value) => return Ok(value),
-        Delivery::Pending(receiver) => receiver,
+        Delivery::Pending { receiver, permit } => (receiver, permit),
     };
     match tokio::time::timeout(timeout, &mut receiver).await {
         Ok(Ok(value)) => Ok(value),
@@ -122,9 +126,11 @@ pub(crate) enum RelayError {
     NotFound,
     Timeout,
     TooManyWaiters,
+    /// The client already has as many open waiting requests as it may.
+    ClientWaitingLimitReached,
     /// The client already has as many unACKed messages stored as it may. One
     /// of them expires after `retry_after`.
-    ClientLimitReached {
+    ClientMessageLimitReached {
         retry_after: Duration,
     },
     /// Every stored entry holds an unACKed message.
@@ -142,8 +148,9 @@ impl From<WaitingListError> for RelayError {
     fn from(error: WaitingListError) -> Self {
         match error {
             WaitingListError::WaiterLimitReached => Self::TooManyWaiters,
-            WaitingListError::ClientLimitReached { retry_after } => {
-                Self::ClientLimitReached { retry_after }
+            WaitingListError::ClientWaitingLimitReached => Self::ClientWaitingLimitReached,
+            WaitingListError::ClientMessageLimitReached { retry_after } => {
+                Self::ClientMessageLimitReached { retry_after }
             }
             WaitingListError::StoreFull => Self::StoreFull,
             WaitingListError::Storage(error) => Self::Storage(error),
@@ -161,7 +168,18 @@ impl IntoResponse for RelayError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Too many concurrent requests",
             ),
-            Self::ClientLimitReached { retry_after } => {
+            Self::ClientWaitingLimitReached => {
+                // The relay can't tell when one of the client's waiting
+                // requests will end. One second keeps clients that honor
+                // Retry-After from retrying in a tight loop.
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(header::RETRY_AFTER, "1")],
+                    "Too many waiting requests from this client",
+                )
+                    .into_response();
+            }
+            Self::ClientMessageLimitReached { retry_after } => {
                 // Rounded up, so clients that wait this long find room.
                 let seconds = retry_after.as_millis().div_ceil(1000).max(1);
                 return (
@@ -186,6 +204,14 @@ mod tests {
     use axum::body::to_bytes;
 
     use super::*;
+    use crate::storage::test_client;
+    use crate::wait_permits::{WaitPermit, WaitPermits};
+
+    fn permit() -> WaitPermit {
+        WaitPermits::new(1)
+            .try_acquire(test_client("198.51.100.1"))
+            .unwrap()
+    }
 
     #[tokio::test]
     async fn storage_error_is_500_without_details() {
@@ -203,7 +229,14 @@ mod tests {
         let (sender, receiver) = oneshot::channel::<()>();
         drop(sender);
 
-        let result = wait_for(Delivery::Pending(receiver), Duration::from_secs(1)).await;
+        let result = wait_for(
+            Delivery::Pending {
+                receiver,
+                permit: permit(),
+            },
+            Duration::from_secs(1),
+        )
+        .await;
 
         assert!(matches!(result, Err(RelayError::NotFound)));
     }
@@ -224,7 +257,14 @@ mod tests {
     async fn timeout_without_value_fails_later_sends() {
         let (sender, receiver) = oneshot::channel::<()>();
 
-        let result = wait_for(Delivery::Pending(receiver), Duration::ZERO).await;
+        let result = wait_for(
+            Delivery::Pending {
+                receiver,
+                permit: permit(),
+            },
+            Duration::ZERO,
+        )
+        .await;
 
         assert!(matches!(result, Err(RelayError::Timeout)));
         assert!(sender.send(()).is_err());
