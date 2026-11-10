@@ -81,8 +81,8 @@ All notable changes are documented here. The format is based on
   `-wal` file; don't relay sensitive data without encrypting it.
 - The bundled SQLite is updated to 3.54.1 for RUSTSEC-2026-0459
   (CVE-2026-119375).
-- Dependencies are updated for RUSTSEC-2026-0190, RUSTSEC-2026-0258, and
-  RUSTSEC-2026-0009.
+- Dependencies are updated for RUSTSEC-2026-0190, RUSTSEC-2026-0258,
+  RUSTSEC-2026-0009, and RUSTSEC-2026-0386.
 
 ## [0.7.0] - 2026-03-10
 
