@@ -168,12 +168,17 @@ impl IntoResponse for RelayError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "Too many concurrent requests",
             ),
-            // No Retry-After: the relay can't tell when one of the client's
-            // waiting requests will end.
-            Self::ClientWaitingLimitReached => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "Too many waiting requests from this client",
-            ),
+            Self::ClientWaitingLimitReached => {
+                // The relay can't tell when one of the client's waiting
+                // requests will end. One second keeps clients that honor
+                // Retry-After from retrying in a tight loop.
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(header::RETRY_AFTER, "1")],
+                    "Too many waiting requests from this client",
+                )
+                    .into_response();
+            }
             Self::ClientMessageLimitReached { retry_after } => {
                 // Rounded up, so clients that wait this long find room.
                 let seconds = retry_after.as_millis().div_ceil(1000).max(1);

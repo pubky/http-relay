@@ -247,15 +247,15 @@ paths:
         '429':
           description: |
             This client already has the maximum number of unacknowledged
-            messages stored (see `ClientMessageLimitReached`, sent with
-            `Retry-After`), or of waiting requests (see
-            `ClientWaitingLimitReached`, sent without it). The message is not
+            messages stored (see `ClientMessageLimitReached`), or of waiting
+            requests (see `ClientWaitingLimitReached`). The message is not
             stored.
           headers:
             Retry-After:
               description: |
-                Only when the client has too many unacknowledged messages
-                stored; see `ClientMessageLimitReached`.
+                Seconds until the client's first unacknowledged message
+                expires, or always 1 when the client has too many waiting
+                requests.
               schema:
                 type: integer
                 minimum: 1
@@ -461,6 +461,14 @@ components:
         methods. A client is an IPv4 address or an IPv6 /56 network. Retry
         after one of the client's waiting requests ends. A `GET` for a message
         that is already stored doesn't wait and never gets this response.
+      headers:
+        Retry-After:
+          description: |
+            Always 1. The relay can't tell when one of the client's waiting
+            requests will end; this keeps clients from retrying at once.
+          schema:
+            type: integer
+            enum: [1]
       content:
         text/plain:
           schema:

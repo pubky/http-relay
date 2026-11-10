@@ -552,7 +552,7 @@ mod tests {
             rejected.text(),
             "Too many waiting requests from this client"
         );
-        assert!(rejected.maybe_header("retry-after").is_none());
+        assert_eq!(rejected.header("retry-after"), "1");
         assert_eq!(other_client.status_code(), 408);
         // The first wait ended, so the client may wait again.
         assert_eq!(get_as("198.51.100.1", "/inbox/b").await.status_code(), 408);

@@ -25,7 +25,8 @@ All notable changes are documented here. The format is based on
   - `--max-waiting-per-client` and `HttpRelayBuilder::max_waiting_per_client`:
     the requests the client can have waiting: `GET /inbox/{id}`,
     `GET /inbox/{id}/await`, and both `/link/{id}` methods. Further ones get
-    `429 Too Many Requests`, and a rejected `POST /link/{id}` stores nothing.
+    `429 Too Many Requests` with `Retry-After: 1`, and a rejected
+    `POST /link/{id}` stores nothing.
     A `GET` for a message that is already stored doesn't wait, so the limit
     doesn't apply to it. Without this limit, a few clients could take every
     slot for waiting IDs, and everyone else's requests for new IDs would get

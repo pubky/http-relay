@@ -171,7 +171,7 @@ curl http://localhost:8080/inbox/my-channel
 - `408 Request Timeout` - No message arrived within timeout (25s default)
 - `429 Too Many Requests` - No message is stored, and this client already has
   the maximum number of waiting requests (`--max-waiting-per-client`). Retry
-  after one of its waiting requests ends.
+  after one of its waiting requests ends; `Retry-After` is always 1.
 - `503 Service Unavailable` - Too many requests already wait for this ID, or
   too many IDs have waiting requests
 

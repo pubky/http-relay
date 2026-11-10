@@ -86,7 +86,7 @@ time.
 - **Waiting requests (`--max-waiting-per-client`):** a request that waits
   counts until it ends with a response, a timeout, or a disconnect. These are `GET /inbox/{id}`,
   `GET /inbox/{id}/await`, and both `/link/{id}` methods. Further waiting
-  requests get `429 Too Many Requests` without a `Retry-After` header, and a
+  requests get `429 Too Many Requests` with `Retry-After: 1`, and a
   rejected `POST /link/{id}` stores nothing. A `GET` for a message that is
   already stored doesn't wait, so this limit doesn't apply to it. If a client's
   network drops without closing the connection, its request still counts until
