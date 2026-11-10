@@ -3,7 +3,7 @@ name = "http-relay"
 description = "A Rust implementation of _some_ of [Http relay spec](https://httprelay.io/)."
 version = "0.7.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 authors = ["SeverinAlexB"]
 license = "MIT"
 homepage = "https://github.com/pubky/http-relay"
@@ -23,7 +23,8 @@ tower-http = { version = "0.6.8", features = ["cors", "trace"] }
 url = "2.5.8"
 
 # Optional: persist feature
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+# `fallible_uint`: read and bind `usize` with a checked conversion.
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"], optional = true }
 
 # Optional: CLI (binary only)
 clap = { version = "4", features = ["derive"], optional = true }
