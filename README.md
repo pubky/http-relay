@@ -42,7 +42,7 @@ Or add as a dependency:
 
 ```toml
 [dependencies]
-http-relay = "0.7"
+http-relay = "0.8"
 ```
 
 **Cargo features** (all on by default):
