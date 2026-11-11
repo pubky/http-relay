@@ -6,7 +6,7 @@ All notable changes are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.8.0] - 2026-11-10
+## [0.8.0] - 2026-11-11
 
 ### Added
 - `--trusted-proxy <CIDR>` (repeatable) and `HttpRelayBuilder::trusted_proxies`:
