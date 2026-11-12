@@ -17,6 +17,23 @@
 //! random and lives only in memory. After a restart, the hashes of entries
 //! stored before it match no client, so those entries count against no
 //! client's limit until they expire.
+//!
+//! # Durability
+//!
+//! Database files use WAL mode with `PRAGMA synchronous=NORMAL`. SQLite's
+//! default, `FULL`, syncs the `-wal` file on every commit; the relay commits
+//! each write while holding the lock that all requests share, so one slow sync
+//! stalls every client. `NORMAL` syncs only at checkpoints. SQLite runs a
+//! checkpoint in the commit that grows the `-wal` file past
+//! `wal_autocheckpoint` (1,000 pages by default), so that commit still syncs
+//! while holding the lock, but most commits don't.
+//!
+//! The database stays consistent after a crash, and a process crash loses
+//! nothing, but a power loss or OS crash can undo the last commits. Each ID
+//! then returns to its state before them: a lost message for a new ID looks
+//! to clients like an expired one, a lost replacement brings back the message
+//! it replaced, and a lost ACK makes the message readable again until it
+//! expires. That's acceptable for messages that live for minutes.
 
 use std::{
     hash::{BuildHasher, RandomState},
@@ -67,11 +84,15 @@ impl EntryRepository {
             .execute_batch(&format!("PRAGMA cache_size=-{CACHE_SIZE_KIB};"))
             .context("Failed to set the cache size")?;
 
-        // In-memory databases don't support WAL.
+        // In-memory databases don't support WAL and never sync to disk.
         if path.is_some() {
             connection
                 .execute_batch("PRAGMA journal_mode=WAL;")
                 .context("Failed to enable WAL mode")?;
+            // Per-connection setting; see "Durability" in the module docs.
+            connection
+                .execute_batch("PRAGMA synchronous=NORMAL;")
+                .context("Failed to set the synchronous mode")?;
         }
 
         connection
@@ -377,6 +398,23 @@ mod tests {
         ));
         std::fs::create_dir_all(&directory).unwrap();
         directory
+    }
+
+    #[test]
+    fn database_files_sync_only_at_checkpoints() {
+        let directory = temp_directory("synchronous");
+        let repository =
+            EntryRepository::open(Some(&directory.join("relay.db")), capacity(10)).unwrap();
+
+        let synchronous: i64 = repository
+            .connection
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .unwrap();
+
+        const NORMAL: i64 = 1;
+        assert_eq!(synchronous, NORMAL);
+        drop(repository);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

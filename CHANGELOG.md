@@ -6,7 +6,16 @@ All notable changes are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+- The Nginx example in [DEPLOY.md](DEPLOY.md#run-behind-nginx) now limits
+  request rates per client address with `limit_req`, sized for 100 active
+  users per address, and answers requests over the limit with `429`.
+
 ### Fixed
+- With `--persist-db`, most writes no longer wait for a disk sync
+  (`PRAGMA synchronous=NORMAL` in WAL mode). All requests share one database
+  lock, so slow syncs delayed every client. A power loss or OS crash can now
+  undo the last writes; the database stays consistent.
 - A waiting request that ended now frees its slot for waiting IDs right away,
   as it already freed its client's slot for waiting requests. Before, the slot
   stayed taken until the waiter map's next prune, so one client could open and

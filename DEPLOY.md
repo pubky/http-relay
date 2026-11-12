@@ -115,8 +115,8 @@ Keep the following in mind when you choose the limits:
   for waiting IDs, with the defaults.
 - **Request rates and connections:** the relay doesn't limit request rates per
   client, and the limit on waiting requests doesn't limit connections. Use the
-  proxy's connection and rate limits for both, and see the note on IPv6 in
-  [Run behind Nginx](#run-behind-nginx).
+  proxy's connection and rate limits for both, as in the example in
+  [Run behind Nginx](#run-behind-nginx), and see the note on IPv6 there.
 
 With `--persist-db`, the database stores a keyed hash of each message's client,
 not its IP address. The key is random and isn't saved, so after a restart, the
@@ -137,6 +137,7 @@ and the certificate paths:
 ```nginx
 # In the http block.
 limit_conn_zone $binary_remote_addr zone=relay_connections:10m;
+limit_req_zone  $binary_remote_addr zone=relay_requests:10m rate=100r/s;
 
 server {
     listen 443 ssl;
@@ -153,6 +154,9 @@ server {
 
     # Many users can share one IP address, for example on conference Wi-Fi.
     limit_conn relay_connections 1000;
+    # Sized for 100 active users per address; see the notes.
+    limit_req zone=relay_requests burst=300 nodelay;
+    limit_req_status 429;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -174,15 +178,22 @@ Notes:
 - Clients can use HTTP/2 with Nginx. Nginx talks HTTP/1.x to the relay. The
   `http2` directive needs Nginx 1.25.1 or later; on older versions, use
   `listen 443 ssl http2;` instead.
-- To also rate-limit requests per client, add a `limit_req_zone` and a
-  `limit_req` directive.
+- `limit_req` allows each client address 100 requests per second, with
+  bursts of up to 300 more. Nginx answers requests over the limit with `429`.
+  The relay handles one database operation at a time, and each write holds
+  the database while SQLite writes, so a client that floods the relay slows
+  down every other client.
+- To size the limit, count about 1 request per second for each active user
+  behind one address, and a burst of about 3 requests per user. The example
+  allows 100 active users per address. A long-poll counts once when it
+  starts, not while it waits.
 - `$binary_remote_addr` is the full client address. Over IPv4 that is one
-  host, but an IPv6 host usually has a whole /64 and can use a new address for
-  each connection, so `limit_conn` doesn't limit it. Nginx can't group IPv6
-  addresses by network itself. The relay limits waiting requests per IPv6
-  /56, but not connections. If abuse over IPv6 is a concern, limit
-  connections per network in front of Nginx, for example in a firewall or a
-  CDN.
+  host, but an IPv6 host usually has a whole /64 and can use a new address
+  for each connection, so `limit_conn` and `limit_req` don't limit it. Nginx
+  can't group IPv6 addresses by network itself. The relay limits waiting requests per IPv6
+  /56, but not connections or request rates. If abuse over IPv6 is a concern,
+  limit connections and request rates per network in front of Nginx, for
+  example in a firewall or a CDN.
 - If the relay runs in a container, trust the address Nginx connects from, such
   as the Docker bridge gateway, instead of `127.0.0.1`. If you publish the
   relay's port, publish it on the loopback address only, for example
