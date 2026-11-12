@@ -130,7 +130,7 @@ level decides where the finding is tracked and how fast it must be fixed. See
 
 An AI agent can help with any of the steps below, including opening issues,
 pull requests, and advisories, but only when a person explicitly tells it to.
-Agents never do these steps on their own.
+Agents don't do these steps on their own.
 
 ### A dependency has an advisory
 
