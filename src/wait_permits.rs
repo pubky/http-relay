@@ -5,11 +5,11 @@
 //! a few clients could take every slot for waiting IDs, and every other
 //! client's request for a new ID would get `503`.
 //!
-//! The permit counts the request itself, not its entry in the waiter map. The
-//! request drops its permit when it ends: with a response, a timeout, or a
-//! disconnect. The waiter map, in contrast, keeps a disconnected request until
-//! its next prune, so a client that reconnects would be blocked by its own
-//! earlier requests.
+//! The request drops its permit when it ends: with a response, a timeout, or a
+//! disconnect. Before the waiting list next counts waiting IDs, it removes the
+//! request's ID, unless another request still waits for it (see
+//! [`crate::waiting_list::Wait`]). So a client can't hold more waiting IDs
+//! than permits.
 
 use std::{
     collections::HashMap,
