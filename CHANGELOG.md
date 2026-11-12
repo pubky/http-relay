@@ -16,6 +16,12 @@ All notable changes are documented here. The format is based on
   (`PRAGMA synchronous=NORMAL` in WAL mode). All requests share one database
   lock, so slow syncs delayed every client. A power loss or OS crash can now
   undo the last writes; the database stays consistent.
+- A waiting request that ended now frees its slot for waiting IDs right away,
+  as it already freed its client's slot for waiting requests. Before, the slot
+  stayed taken until the waiter map's next prune, so one client could open and
+  drop requests for new IDs until every other client's request for a new ID
+  got `503`. Now `--max-waiting-per-client` also limits the waiting IDs one
+  client can take.
 
 ## [0.8.0] - 2026-11-11
 

@@ -12,7 +12,7 @@ use axum::{
 use tokio::sync::oneshot;
 
 use crate::storage::Message;
-use crate::waiting_list::{Delivery, WaitingListError};
+use crate::waiting_list::{Delivery, Wait, WaitingListError};
 
 /// Maximum allowed length for IDs (in bytes).
 /// 256 bytes accommodates typical ID patterns (UUIDs are 36 chars, base64-encoded
@@ -94,19 +94,18 @@ impl IntoResponse for Message {
 /// treats a successful send as delivered (a link producer gets its ACK), so
 /// dropping that value would lose the message.
 ///
-/// Holds the request's wait permit until it returns, or until the future is
-/// dropped because the client disconnected.
+/// Holds the [`Wait`] until it returns, or until the future is dropped because
+/// the client disconnected.
 pub(crate) async fn wait_for<T>(delivery: Delivery<T>, timeout: Duration) -> Result<T, RelayError> {
-    // Bound to a name, not `_`, which would drop the permit right here.
-    let (mut receiver, _permit) = match delivery {
+    let mut wait: Wait<T> = match delivery {
         Delivery::Ready(value) => return Ok(value),
-        Delivery::Pending { receiver, permit } => (receiver, permit),
+        Delivery::Pending(wait) => wait,
     };
-    match tokio::time::timeout(timeout, &mut receiver).await {
+    match tokio::time::timeout(timeout, &mut wait.receiver).await {
         Ok(Ok(value)) => Ok(value),
         // The entry expired, or a new message replaced it.
         Ok(Err(_)) => Err(RelayError::NotFound),
-        Err(_) => take_value_sent_before_timeout(receiver),
+        Err(_) => take_value_sent_before_timeout(&mut wait.receiver),
     }
 }
 
@@ -114,7 +113,7 @@ pub(crate) async fn wait_for<T>(delivery: Delivery<T>, timeout: Duration) -> Res
 /// before it closed, or [`RelayError::Timeout`].
 ///
 /// After `close`, every send fails, so no value can arrive unseen.
-fn take_value_sent_before_timeout<T>(mut receiver: oneshot::Receiver<T>) -> Result<T, RelayError> {
+fn take_value_sent_before_timeout<T>(receiver: &mut oneshot::Receiver<T>) -> Result<T, RelayError> {
     receiver.close();
     receiver.try_recv().map_err(|_| RelayError::Timeout)
 }
@@ -204,14 +203,6 @@ mod tests {
     use axum::body::to_bytes;
 
     use super::*;
-    use crate::storage::test_client;
-    use crate::wait_permits::{WaitPermit, WaitPermits};
-
-    fn permit() -> WaitPermit {
-        WaitPermits::new(1)
-            .try_acquire(test_client("198.51.100.1"))
-            .unwrap()
-    }
 
     #[tokio::test]
     async fn storage_error_is_500_without_details() {
@@ -230,10 +221,7 @@ mod tests {
         drop(sender);
 
         let result = wait_for(
-            Delivery::Pending {
-                receiver,
-                permit: permit(),
-            },
+            Delivery::Pending(Wait::detached(receiver)),
             Duration::from_secs(1),
         )
         .await;
@@ -245,10 +233,10 @@ mod tests {
     fn value_sent_as_the_timeout_fires_is_returned() {
         // Regression test: a link consumer timed out with 408 while its
         // producer got the ACK for the message the consumer never returned.
-        let (sender, receiver) = oneshot::channel();
+        let (sender, mut receiver) = oneshot::channel();
         sender.send("message").unwrap();
 
-        let result = take_value_sent_before_timeout(receiver);
+        let result = take_value_sent_before_timeout(&mut receiver);
 
         assert!(matches!(result, Ok("message")));
     }
@@ -257,14 +245,7 @@ mod tests {
     async fn timeout_without_value_fails_later_sends() {
         let (sender, receiver) = oneshot::channel::<()>();
 
-        let result = wait_for(
-            Delivery::Pending {
-                receiver,
-                permit: permit(),
-            },
-            Duration::ZERO,
-        )
-        .await;
+        let result = wait_for(Delivery::Pending(Wait::detached(receiver)), Duration::ZERO).await;
 
         assert!(matches!(result, Err(RelayError::Timeout)));
         assert!(sender.send(()).is_err());
