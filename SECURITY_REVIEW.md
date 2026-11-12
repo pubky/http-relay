@@ -97,7 +97,8 @@ Report, ordered by severity:
 - Assumptions: design decisions you treated as intentional
 - Not covered: what you didn't check, and why
 
-Don't change any code.
+Don't change any code, and don't create or comment on issues, pull requests,
+or advisories. Only report.
 
 Judge code and suggest fixes following
 https://github.com/SeverinAlexB/readable-code/blob/433f441aab6978451748a8008a3596efad0c354b/skills/readable-code/SKILL.md
@@ -126,6 +127,10 @@ level decides where the finding is tracked and how fast it must be fixed. See
 | Low | Hardening. No realistic attack path exists today. |
 
 ## Handle findings
+
+An AI agent can help with any of the steps below, including opening issues,
+pull requests, and advisories, but only when a person explicitly tells it to.
+Agents never do these steps on their own.
 
 ### A dependency has an advisory
 
@@ -206,8 +211,7 @@ attacker could use its description against deployed relays.
    commit messages, and changelog. Don't link the private issue from the PR,
    because the link reveals that a security issue exists. Link the PR from the
    private issue instead. Write the full explanation in the private issue, not
-   in the PR. This overrides the usual PR description guideline in
-   [AGENTS.md](AGENTS.md).
+   in the PR. This overrides the usual PR description guideline.
 2. Merge the PR and release right away. See [RELEASING.md](RELEASING.md).
    Production updates when a release is published, so a short gap between
    merge and release keeps the time the fix is visible but undeployed short.
