@@ -23,11 +23,17 @@
 //! Database files use WAL mode with `PRAGMA synchronous=NORMAL`. SQLite's
 //! default, `FULL`, syncs the `-wal` file on every commit; the relay commits
 //! each write while holding the lock that all requests share, so one slow sync
-//! stalls every client. `NORMAL` syncs only at checkpoints. The database stays
-//! consistent after a crash, and a process crash loses nothing, but a power
-//! loss or OS crash can undo the last commits. That's acceptable for messages
-//! that live for minutes: a lost message looks to clients like an expired one,
-//! and a lost ACK makes the message readable again until it expires.
+//! stalls every client. `NORMAL` syncs only at checkpoints. SQLite runs a
+//! checkpoint in the commit that grows the `-wal` file past
+//! `wal_autocheckpoint` (1,000 pages by default), so that commit still syncs
+//! while holding the lock, but most commits don't.
+//!
+//! The database stays consistent after a crash, and a process crash loses
+//! nothing, but a power loss or OS crash can undo the last commits. Each ID
+//! then returns to its state before them: a lost message for a new ID looks
+//! to clients like an expired one, a lost replacement brings back the message
+//! it replaced, and a lost ACK makes the message readable again until it
+//! expires. That's acceptable for messages that live for minutes.
 
 use std::{
     hash::{BuildHasher, RandomState},
@@ -407,6 +413,7 @@ mod tests {
 
         const NORMAL: i64 = 1;
         assert_eq!(synchronous, NORMAL);
+        drop(repository);
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
