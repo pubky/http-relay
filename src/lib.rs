@@ -1,29 +1,26 @@
 //! A Rust implementation of _some_ of [Http relay spec](https://httprelay.io/).
 //!
+//! Start a relay with [`HttpRelay::builder`].
+//!
 //! # Feature Flags
 //!
-//! - `server` (default): HTTP server with axum. Enables `HttpRelay` and `HttpRelayBuilder`.
-//! - `persist` (default): SQLite persistence. Without this, uses in-memory HashMap storage.
-//! - `link-compat`: Legacy `/link/{id}` endpoints (deprecated, requires `server`).
-//!
-//! # Library-only Usage
-//!
-//! Without the `server` feature, you can use the core types directly:
-//! ```ignore
-//! use http_relay::{EntryRepository, WaitingList, Message};
-//! ```
+//! - `persist` (default): SQLite persistence, configured with
+//!   `HttpRelayBuilder::persist_db`. Without it, entries live in memory only.
+//! - `link-compat` (default): Legacy `/link/{id}` endpoints (deprecated).
+//! - `cli` (default): The `http-relay` binary.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
-mod http_relay;
+mod client_ip;
+mod endpoint;
+mod inbox;
+#[cfg(feature = "link-compat")]
+mod link;
+mod server;
+mod storage;
+mod wait_permits;
+mod waiting_list;
 
-// Server exports (only with `server` feature)
-#[cfg(feature = "server")]
-pub use http_relay::{HttpRelay, HttpRelayBuilder};
-
-// Core types (always available)
-pub use http_relay::{
-    EntryRepository, GetOrSubscribeResult, Message, StoredEntry, SubscribeError, WaitingList,
-};
+pub use server::{HttpRelay, HttpRelayBuilder};

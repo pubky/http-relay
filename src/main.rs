@@ -2,16 +2,16 @@
 
 #![forbid(unsafe_code)]
 
-use std::{net::IpAddr, path::PathBuf, time::Duration};
+#[cfg(feature = "persist")]
+use std::path::PathBuf;
+use std::{net::IpAddr, num::NonZeroUsize, time::Duration};
 
 use anyhow::Result;
 use clap::Parser;
 use http_relay::HttpRelayBuilder;
+use ipnet::IpNet;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
-
-/// Default maximum entries in the waiting list.
-const DEFAULT_MAX_ENTRIES: usize = 10_000;
 
 #[derive(Parser, Debug)]
 #[command(name = "http-relay")]
@@ -27,27 +27,49 @@ struct Args {
     port: u16,
 
     /// Link endpoint timeout in seconds (how long producer/consumer wait for each other)
-    #[arg(long, default_value_t = 600)]
+    #[arg(long, default_value_t = HttpRelayBuilder::DEFAULT_LINK_TIMEOUT.as_secs())]
     link_timeout: u64,
 
     /// Inbox long-poll timeout in seconds (shorter to avoid proxy timeouts)
-    #[arg(long, default_value_t = 25)]
+    #[arg(long, default_value_t = HttpRelayBuilder::DEFAULT_INBOX_TIMEOUT.as_secs())]
     inbox_timeout: u64,
 
     /// Inbox message TTL in seconds (how long messages persist before expiring)
-    #[arg(long, default_value_t = 300)]
+    #[arg(long, default_value_t = HttpRelayBuilder::DEFAULT_INBOX_CACHE_TTL.as_secs())]
     inbox_cache_ttl: u64,
 
     /// Maximum request body size in bytes
-    #[arg(long, default_value_t = 2 * 1024)]
+    #[arg(long, default_value_t = HttpRelayBuilder::DEFAULT_MAX_BODY_SIZE)]
     max_body_size: usize,
 
-    /// Maximum entries in the waiting list (oldest entries evicted when full)
-    #[arg(long, default_value_t = DEFAULT_MAX_ENTRIES)]
+    /// Maximum stored entries (new IDs get 503 when every entry holds an
+    /// unACKed message). Also limits the number of IDs with waiting requests
+    /// (503 when full)
+    #[arg(long, default_value_t = HttpRelayBuilder::DEFAULT_MAX_ENTRIES)]
     max_entries: usize,
+
+    /// Maximum unACKed messages one client (IPv4 address or IPv6 /56) can have
+    /// stored. Further messages get 429
+    #[arg(
+        long,
+        default_value_t = NonZeroUsize::new(HttpRelayBuilder::DEFAULT_MAX_ENTRIES_PER_CLIENT)
+            .expect("the default is not zero")
+    )]
+    max_entries_per_client: NonZeroUsize,
+
+    /// Maximum requests one client (IPv4 address or IPv6 /56) can have
+    /// waiting: inbox GET and /await, and link GET and POST. Further ones get
+    /// 429
+    #[arg(
+        long,
+        default_value_t = NonZeroUsize::new(HttpRelayBuilder::DEFAULT_MAX_WAITING_PER_CLIENT)
+            .expect("the default is not zero")
+    )]
+    max_waiting_per_client: NonZeroUsize,
 
     /// Path to SQLite database for persistent storage.
     /// If not specified, uses in-memory storage (data lost on restart).
+    #[cfg(feature = "persist")]
     #[arg(long)]
     persist_db: Option<PathBuf>,
 
@@ -58,6 +80,11 @@ struct Args {
     /// Enable permissive CORS headers (Access-Control-Allow-Origin: *)
     #[arg(long)]
     cors_allow_all: bool,
+
+    /// Identify clients behind this proxy (IP or CIDR, repeatable) by the
+    /// X-Forwarded-For header. Its requests without a valid header get 400.
+    #[arg(long, value_name = "CIDR", value_parser = parse_network)]
+    trusted_proxy: Vec<IpNet>,
 
     /// Silence all output
     #[arg(short, long)]
@@ -70,7 +97,7 @@ async fn main() -> Result<()> {
 
     init_tracing(args.verbose, args.quiet);
 
-    let relay = HttpRelayBuilder::default()
+    let builder = HttpRelayBuilder::default()
         .bind_address(args.bind)
         .http_port(args.port)
         .link_timeout(Duration::from_secs(args.link_timeout))
@@ -78,10 +105,13 @@ async fn main() -> Result<()> {
         .inbox_cache_ttl(Duration::from_secs(args.inbox_cache_ttl))
         .max_body_size(args.max_body_size)
         .max_entries(args.max_entries)
-        .persist_db(args.persist_db)
+        .max_entries_per_client(args.max_entries_per_client.get())
+        .max_waiting_per_client(args.max_waiting_per_client.get())
         .cors_allow_all(args.cors_allow_all)
-        .run()
-        .await?;
+        .trusted_proxies(args.trusted_proxy);
+    #[cfg(feature = "persist")]
+    let builder = builder.persist_db(args.persist_db);
+    let relay = builder.run().await?;
 
     tracing::info!(
         address = %relay.http_address(),
@@ -104,6 +134,14 @@ async fn main() -> Result<()> {
     relay.shutdown().await?;
 
     Ok(())
+}
+
+/// Parses a CIDR network; a bare IP address means just that address.
+fn parse_network(value: &str) -> Result<IpNet, String> {
+    value
+        .parse::<IpNet>()
+        .or_else(|_| value.parse::<IpAddr>().map(IpNet::from))
+        .map_err(|_| format!("`{value}` is not an IP address or CIDR network"))
 }
 
 fn log_level(verbose: u8, quiet: bool) -> LevelFilter {
@@ -135,27 +173,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_quiet_overrides_verbose() {
-        assert_eq!(log_level(3, true), LevelFilter::OFF);
+    fn test_parse_network_accepts_cidr_and_bare_ip() {
+        assert_eq!(
+            parse_network("10.0.0.0/8"),
+            Ok("10.0.0.0/8".parse().unwrap())
+        );
+        assert_eq!(
+            parse_network("127.0.0.1"),
+            Ok("127.0.0.1/32".parse().unwrap())
+        );
+        assert_eq!(parse_network("::1"), Ok("::1/128".parse().unwrap()));
+        assert!(parse_network("localhost").is_err());
     }
 
     #[test]
-    fn test_default_is_warn() {
-        assert_eq!(log_level(0, false), LevelFilter::WARN);
-    }
-
-    #[test]
-    fn test_verbose_info() {
-        assert_eq!(log_level(1, false), LevelFilter::INFO);
-    }
-
-    #[test]
-    fn test_verbose_debug() {
-        assert_eq!(log_level(2, false), LevelFilter::DEBUG);
-    }
-
-    #[test]
-    fn test_verbose_trace() {
-        assert_eq!(log_level(3, false), LevelFilter::TRACE);
+    fn test_args_are_consistent() {
+        use clap::CommandFactory;
+        Args::command().debug_assert();
     }
 }

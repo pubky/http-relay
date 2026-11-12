@@ -1,9 +1,9 @@
 [package]
 name = "http-relay"
 description = "A Rust implementation of _some_ of [Http relay spec](https://httprelay.io/)."
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 authors = ["SeverinAlexB"]
 license = "MIT"
 homepage = "https://github.com/pubky/http-relay"
@@ -14,19 +14,17 @@ categories = ["web-programming"]
 [dependencies]
 anyhow = "1.0.103"
 bytes = "1"
-futures-util = "0.3.31"
 tokio = { version = "1.49.0", features = ["full"] }
 tracing = "0.1.44"
-
-# Optional: server feature
-axum = { version = "0.8.8", optional = true }
-http-body = { version = "1.0", optional = true }
-axum-server = { version = "0.8.0", optional = true }
-tower-http = { version = "0.6.8", features = ["cors", "trace"], optional = true }
-url = { version = "2.5.8", optional = true }
+axum = "0.8.8"
+axum-server = "0.8.0"
+ipnet = "2"
+tower-http = { version = "0.6.8", features = ["cors", "trace"] }
+url = "2.5.8"
 
 # Optional: persist feature
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+# `fallible_uint`: read and bind `usize` with a checked conversion.
+rusqlite = { version = "0.41", features = ["bundled", "fallible_uint"], optional = true }
 
 # Optional: CLI (binary only)
 clap = { version = "4", features = ["derive"], optional = true }
@@ -35,8 +33,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = tr
 [features]
 default = ["cli", "persist", "link-compat"]
 
-# HTTP server (axum + handlers + middleware)
-server = ["dep:axum", "dep:http-body", "dep:axum-server", "dep:tower-http", "dep:url"]
+# No effect: the server is always built. Kept so that dependents that enabled
+# it still resolve.
+server = []
 
 # SQLite persistence (without this: in-memory HashMap storage)
 persist = ["dep:rusqlite"]
@@ -45,7 +44,7 @@ persist = ["dep:rusqlite"]
 link-compat = []
 
 # CLI binary
-cli = ["dep:clap", "dep:tracing-subscriber", "server"]
+cli = ["dep:clap", "dep:tracing-subscriber"]
 
 [[bin]]
 name = "http-relay"
@@ -54,4 +53,3 @@ required-features = ["cli"]
 
 [dev-dependencies]
 axum-test = "18.7.0"
-http-body-util = "0.1"

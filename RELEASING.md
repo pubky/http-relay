@@ -29,17 +29,26 @@ Then update the lockfile:
 cargo check
 ```
 
+Update the version in the other places that name it:
+
+- `CHANGELOG.md`: rename `## [Unreleased]` to `## [0.7.0] - YYYY-MM-DD` and add
+  an empty `## [Unreleased]` above it. At the bottom, point `[Unreleased]` to
+  `compare/v0.7.0...HEAD` and add a `[0.7.0]` compare link.
+- `openapi.yaml`: `info.version`.
+- `README.md`: the version in the dependency example (`http-relay = "0.7"`),
+  for a minor or major release.
+
 Create the version PR:
 
 ```bash
 git checkout -b chore/v0.7.0
-git add Cargo.toml Cargo.lock
+git add Cargo.toml Cargo.lock CHANGELOG.md openapi.yaml README.md
 git commit -m "release: v0.7.0"
 git push origin chore/v0.7.0
 ```
 
 PR title: chore: v0.7.0
-PR description: Changelogs
+PR description: the version's section from `CHANGELOG.md`
 
 ### 3. Tag and push
 

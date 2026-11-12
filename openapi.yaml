@@ -23,7 +23,15 @@ info:
 
     This pattern is mobile-friendly: if the app is backgrounded or killed, the
     message remains available for retry, and the producer can detect timeouts.
-  version: 0.6.0
+
+    ## Errors
+
+    Error responses have a short `text/plain` body: `ID too long` (400),
+    `Invalid X-Forwarded-For header` (400), `Not found` (404), `Request timed out` (408), `Too many unacknowledged
+    messages from this client` (429), `Too many waiting requests from this client` (429),
+    `Too many concurrent requests` (503),
+    `Server at capacity` (503) or `Storage error` (500).
+  version: 0.8.0
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
@@ -53,6 +61,14 @@ paths:
       responses:
         '200':
           description: Message stored successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/ClientMessageLimitReached'
+        '500':
+          $ref: '#/components/responses/StorageError'
+        '503':
+          $ref: '#/components/responses/ServerAtCapacity'
 
     get:
       summary: Retrieve a message (long-poll)
@@ -76,8 +92,16 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/InboxMessage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '408':
           description: No message arrived within timeout (25s default)
+        '429':
+          $ref: '#/components/responses/ClientWaitingLimitReached'
+        '500':
+          $ref: '#/components/responses/StorageError'
+        '503':
+          $ref: '#/components/responses/TooManyWaiters'
 
     delete:
       summary: Acknowledge a message
@@ -94,8 +118,12 @@ paths:
       responses:
         '200':
           description: Message acknowledged and removed
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '404':
-          description: No message to acknowledge
+          description: No message to acknowledge (not posted yet, or expired)
+        '500':
+          $ref: '#/components/responses/StorageError'
 
   /inbox/{id}/ack:
     get:
@@ -105,9 +133,11 @@ paths:
 
         Returns "true" if the message was acknowledged (DELETEd),
         "false" if the message exists but hasn't been acknowledged yet,
-        or 404 if no message exists (not posted yet, or expired).
+        or 404 if no message exists (not posted yet, expired, or deleted after
+        the ACK to make room in a full store).
 
-        Use this for polling scenarios. For blocking behavior, use `/await`.
+        Use this for polling scenarios. For blocking behavior, use `/await`,
+        which always sees the ACK while it waits.
       operationId: inboxAckStatus
       tags:
         - inbox
@@ -124,8 +154,12 @@ paths:
                   - 'true'
                   - 'false'
               example: 'false'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '404':
           description: No message exists for this ID
+        '500':
+          $ref: '#/components/responses/StorageError'
 
   /inbox/{id}/await:
     get:
@@ -136,7 +170,8 @@ paths:
         The producer calls this after POST to wait for the consumer's DELETE.
         Default timeout is 25 seconds (compatible with proxy timeouts).
 
-        Returns 200 when acknowledged, 408 on timeout.
+        Returns 200 when acknowledged, 408 on timeout, and 404 if no message
+        exists, or if it expires or a new message replaces it while waiting.
       operationId: inboxAwait
       tags:
         - inbox
@@ -145,8 +180,18 @@ paths:
       responses:
         '200':
           description: Message was acknowledged
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: No message exists, or it expired or was replaced while waiting
         '408':
           description: Timeout waiting for acknowledgment (default 25s)
+        '429':
+          $ref: '#/components/responses/ClientWaitingLimitReached'
+        '500':
+          $ref: '#/components/responses/StorageError'
+        '503':
+          $ref: '#/components/responses/TooManyWaiters'
 
   /link/{id}:
     get:
@@ -165,8 +210,16 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/MessageReceived'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '408':
           $ref: '#/components/responses/Timeout'
+        '429':
+          $ref: '#/components/responses/ClientWaitingLimitReached'
+        '500':
+          $ref: '#/components/responses/StorageError'
+        '503':
+          $ref: '#/components/responses/TooManyWaiters'
 
     post:
       summary: Produce a message (deprecated)
@@ -186,8 +239,49 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/MessageDelivered'
+        '404':
+          description: Another producer replaced the message before a consumer received it
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '408':
           $ref: '#/components/responses/Timeout'
+        '429':
+          description: |
+            This client already has the maximum number of unacknowledged
+            messages stored (see `ClientMessageLimitReached`), or of waiting
+            requests (see `ClientWaitingLimitReached`). The message is not
+            stored.
+          headers:
+            Retry-After:
+              description: |
+                Seconds until the client's first unacknowledged message
+                expires, or always 1 when the client has too many waiting
+                requests.
+              schema:
+                type: integer
+                minimum: 1
+          content:
+            text/plain:
+              schema:
+                type: string
+              examples:
+                storedMessages:
+                  value: Too many unacknowledged messages from this client
+                waitingRequests:
+                  value: Too many waiting requests from this client
+        '500':
+          $ref: '#/components/responses/StorageError'
+        '503':
+          description: |
+            Server at capacity (see `ServerAtCapacity`), or too many requests
+            already wait for this ID (see `TooManyWaiters`).
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum:
+                  - Server at capacity
+                  - Too many concurrent requests
 
 components:
   parameters:
@@ -208,10 +302,11 @@ components:
       in: path
       required: true
       description: |
-        Unique channel identifier. Producers and consumers using the same
-        ID are paired.
+        Unique channel identifier (max 256 bytes). Producers and consumers
+        using the same ID are paired.
       schema:
         type: string
+        maxLength: 256
       example: my-channel
 
   requestBodies:
@@ -244,6 +339,19 @@ components:
           description: Content-Type from the producer's request (if provided)
           schema:
             type: string
+        Content-Security-Policy:
+          description: |
+            Always `sandbox`. The producer chooses the body and Content-Type,
+            so browsers must not run relayed content as a page on the relay's
+            origin. Doesn't affect `fetch()` or non-browser clients.
+          schema:
+            type: string
+            enum: [sandbox]
+        X-Content-Type-Options:
+          description: Always `nosniff`, so browsers don't guess a different type.
+          schema:
+            type: string
+            enum: [nosniff]
       content:
         application/octet-stream:
           schema:
@@ -263,6 +371,19 @@ components:
           description: Content-Type from the producer's request (if provided)
           schema:
             type: string
+        Content-Security-Policy:
+          description: |
+            Always `sandbox`. The producer chooses the body and Content-Type,
+            so browsers must not run relayed content as a page on the relay's
+            origin. Doesn't affect `fetch()` or non-browser clients.
+          schema:
+            type: string
+            enum: [sandbox]
+        X-Content-Type-Options:
+          description: Always `nosniff`, so browsers don't guess a different type.
+          schema:
+            type: string
+            enum: [nosniff]
       content:
         application/octet-stream:
           schema:
@@ -280,6 +401,99 @@ components:
 
     Timeout:
       description: Timeout waiting for counterpart (producer or consumer)
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Request timed out
+
+    BadRequest:
+      description: |
+        The ID is longer than 256 bytes (`ID too long`), or the request comes
+        from a trusted proxy (`--trusted-proxy`) without a valid
+        `X-Forwarded-For` header (`Invalid X-Forwarded-For header`).
+      content:
+        text/plain:
+          schema:
+            type: string
+          examples:
+            idTooLong:
+              value: ID too long
+            invalidForwardedFor:
+              value: Invalid X-Forwarded-For header
+
+    TooManyWaiters:
+      description: |
+        Too many requests already wait for this ID, or too many IDs have
+        waiting requests.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Too many concurrent requests
+
+    ClientMessageLimitReached:
+      description: |
+        This client already has the maximum number of unacknowledged messages
+        stored (`--max-entries-per-client`, 100 by default). A client is an
+        IPv4 address or an IPv6 /56 network. The new message is not stored.
+        Replacing one of the client's unacknowledged messages is still
+        allowed. Retry
+        after one of the client's messages is acknowledged or expires.
+      headers:
+        Retry-After:
+          description: |
+            Seconds until the client's first unacknowledged message expires,
+            rounded up. An acknowledgement can make room sooner.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Too many unacknowledged messages from this client
+
+    ClientWaitingLimitReached:
+      description: |
+        This client already has the maximum number of waiting requests
+        (`--max-waiting-per-client`, 100 by default). Waiting requests are
+        `GET /inbox/{id}`, `GET /inbox/{id}/await`, and both `/link/{id}`
+        methods. A client is an IPv4 address or an IPv6 /56 network. Retry
+        after one of the client's waiting requests ends. A `GET` for a message
+        that is already stored doesn't wait and never gets this response.
+      headers:
+        Retry-After:
+          description: |
+            Always 1. The relay can't tell when one of the client's waiting
+            requests will end; this keeps clients from retrying at once.
+          schema:
+            type: integer
+            enum: [1]
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Too many waiting requests from this client
+
+    ServerAtCapacity:
+      description: |
+        The store is full and every entry still holds an undelivered message.
+        The new message is not stored and existing messages are kept. Expired
+        and acknowledged entries free up room, so retry later.
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Server at capacity
+
+    StorageError:
+      description: The relay failed to read or write its storage
+      content:
+        text/plain:
+          schema:
+            type: string
+          example: Storage error
 
 tags:
   - name: inbox

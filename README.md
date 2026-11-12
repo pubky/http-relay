@@ -42,8 +42,17 @@ Or add as a dependency:
 
 ```toml
 [dependencies]
-http-relay = "0.6"
+http-relay = "0.8"
 ```
+
+**Cargo features** (all on by default):
+
+- `persist`: SQLite persistence (`--persist-db`). Without it, entries live in
+  memory only and the flag doesn't exist.
+- `link-compat`: the deprecated `/link/{id}` endpoints.
+- `cli`: the `http-relay` binary.
+
+The `server` feature has no effect; the server is always built.
 
 ## Usage
 
@@ -53,7 +62,7 @@ http-relay = "0.6"
 # Default: bind to 127.0.0.1:8080 (localhost only)
 http-relay
 
-# Bind to all interfaces (for production/Docker)
+# Bind to all interfaces (for Docker, behind a reverse proxy)
 http-relay --bind 0.0.0.0
 
 # Custom configuration
@@ -68,10 +77,14 @@ http-relay --bind 0.0.0.0 --port 15412 --inbox-cache-ttl 300 --inbox-timeout 25 
 | `--port <PORT>` | HTTP port (0 = random) | `8080` |
 | `--inbox-cache-ttl <SECS>` | Message TTL for inbox | `300` |
 | `--inbox-timeout <SECS>` | Inbox long-poll timeout | `25` |
+| `--link-timeout <SECS>` | Link endpoint timeout | `600` |
 | `--max-body-size <BYTES>` | Max request body size | `2048` (2KB) |
-| `--max-entries <N>` | Max entries in waiting list | `10000` |
-| `--persist-db <PATH>` | SQLite database path for persistence | (in-memory) |
+| `--max-entries <N>` | Max stored entries, and max IDs with waiting requests. When the store is full, expired and ACKed entries make room; if there are none, `POST` to a new ID returns `503` | `10000` |
+| `--max-entries-per-client <N>` | Max unACKed messages one client can have stored; further `POST`s return `429`. A client is an IPv4 address or an IPv6 /56 network | `100` |
+| `--max-waiting-per-client <N>` | Max requests one client can have waiting (inbox `GET` and `/await`, both `/link` methods); further ones return `429`. Counted separately from `--max-entries-per-client` | `100` |
+| `--persist-db <PATH>` | SQLite database path for persistence (`persist` feature) | (in-memory) |
 | `--cors-allow-all` | Enable permissive CORS (`Access-Control-Allow-Origin: *`) | off |
+| `--trusted-proxy <CIDR>` | Identify clients behind this proxy by `X-Forwarded-For`. Repeatable. See [DEPLOY.md](DEPLOY.md) | off (TCP peer) |
 | `-v` | Verbosity (repeat for more) | warn |
 | `-q, --quiet` | Silence output | - |
 
@@ -94,6 +107,13 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
+## Deploy in production
+
+Production deployments require a reverse proxy that parses HTTP. The proxy
+terminates TLS and protects the relay from slow clients, which the relay
+doesn't handle itself. See [DEPLOY.md](DEPLOY.md) for the requirements, an
+Nginx setup, and how the relay identifies clients behind a proxy.
+
 ## API
 
 ### Inbox Endpoints
@@ -112,7 +132,8 @@ The primary API. Store-and-forward with explicit acknowledgment.
 **Inbox IDs act as shared secrets.** Anyone who knows an ID can read/write/ACK
 that inbox. IDs should be cryptographically random (e.g., 128-bit UUIDs).
 Predictable IDs allow attackers to intercept or acknowledge messages.
-Messages persist in plaintext memory for the TTL duration. Do not relay
+Messages persist in plaintext until they're ACKed or expire. With
+`--persist-db`, deleted bodies can remain on disk after that. Do not relay
 sensitive one-time credentials unless encryption is applied at the
 application layer.
 
@@ -129,7 +150,12 @@ curl -X POST http://localhost:8080/inbox/my-channel \
 
 **Responses:**
 - `200 OK` - Message stored successfully
-- `503 Service Unavailable` - Server at capacity
+- `429 Too Many Requests` - This client already has the maximum number of
+  unACKed messages stored (`--max-entries-per-client`). Replacing one of them
+  is still allowed. Retry after one is ACKed or expires; the `Retry-After`
+  header gives the seconds until the first one expires.
+- `503 Service Unavailable` - Server at capacity: every stored entry still holds
+  an undelivered message. Existing messages are kept; retry later.
 
 #### GET `/inbox/{id}` - Retrieve Message (Long-Poll)
 
@@ -143,6 +169,11 @@ curl http://localhost:8080/inbox/my-channel
 **Responses:**
 - `200 OK` - Returns message with original Content-Type
 - `408 Request Timeout` - No message arrived within timeout (25s default)
+- `429 Too Many Requests` - No message is stored, and this client already has
+  the maximum number of waiting requests (`--max-waiting-per-client`). Retry
+  after one of its waiting requests ends; `Retry-After` is always 1.
+- `503 Service Unavailable` - Too many requests already wait for this ID, or
+  too many IDs have waiting requests
 
 #### DELETE `/inbox/{id}` - Acknowledge Delivery
 
@@ -154,6 +185,7 @@ curl -X DELETE http://localhost:8080/inbox/my-channel
 
 **Responses:**
 - `200 OK` - Message acknowledged and cleared
+- `404 Not Found` - No message exists (not posted yet, or expired)
 
 #### GET `/inbox/{id}/ack` - Check ACK Status
 
@@ -165,7 +197,9 @@ curl http://localhost:8080/inbox/my-channel/ack
 
 **Responses:**
 - `200 OK` - Body contains `true` (ACKed) or `false` (pending)
-- `404 Not Found` - No message exists (not posted yet, or expired)
+- `404 Not Found` - No message exists: not posted yet, expired, or deleted
+  after the ACK to make room in a full store. `/await` doesn't have this
+  problem for an ACK that happens while it waits.
 
 #### GET `/inbox/{id}/await` - Wait for ACK
 
@@ -177,7 +211,18 @@ curl http://localhost:8080/inbox/my-channel/await
 
 **Responses:**
 - `200 OK` - Consumer ACKed the message
+- `404 Not Found` - No message exists, or it expired or was replaced while waiting
 - `408 Request Timeout` - No ACK received within timeout (default 25s)
+- `429 Too Many Requests` - This client already has the maximum number of
+  waiting requests (`--max-waiting-per-client`)
+- `503 Service Unavailable` - Too many requests already wait for this ACK
+
+All endpoints answer `400 Bad Request` with `ID too long` if the ID is longer
+than 256 bytes, and `500 Internal Server Error` with `Storage error` if the
+relay can't read or write its storage. With `--trusted-proxy`, requests from a
+trusted proxy without a valid `X-Forwarded-For` header get `400 Bad Request`
+with `Invalid X-Forwarded-For header`; see [DEPLOY.md](DEPLOY.md). Error bodies are short `text/plain`
+messages.
 
 ### Typical Flow
 
@@ -229,6 +274,11 @@ backwards compatibility but not recommended for new integrations.
 |--------|----------|-------------|
 | `POST` | `/link/{id}` | Send message, block until consumer retrieves (10 min timeout) |
 | `GET` | `/link/{id}` | Retrieve message, block until producer sends (10 min timeout) |
+
+Both methods count as waiting requests toward `--max-waiting-per-client`. Over
+the limit, they get `429 Too Many Requests`, and a rejected `POST` stores
+nothing. A `GET` for a message that is already stored doesn't wait, so the limit
+doesn't apply to it.
 
 **Why prefer `/inbox`:** The `/link` endpoint has no ACK mechanism—if the consumer
 disconnects after receiving data, the producer still gets `200 OK`. The 10-minute
