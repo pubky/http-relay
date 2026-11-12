@@ -6,8 +6,8 @@
 //! client's request for a new ID would get `503`.
 //!
 //! The request drops its permit when it ends: with a response, a timeout, or a
-//! disconnect. Its ID leaves the waiter map the next time the waiting list
-//! adds a waiter, unless another request still waits for it (see
+//! disconnect. Before the waiting list next counts waiting IDs, it removes the
+//! request's ID, unless another request still waits for it (see
 //! [`crate::waiting_list::Wait`]). So a client can't hold more waiting IDs
 //! than permits.
 

@@ -34,12 +34,21 @@ pub(crate) enum Delivery<T> {
 /// or a new message replaces it. The channel waiting for a message stays open
 /// until the next message arrives.
 pub(crate) struct Wait<T> {
-    // Fields drop in declaration order. The receiver goes first, so the waiter
-    // is closed by the time `_end` reports it.
     pub receiver: oneshot::Receiver<T>,
+    // Fields drop in declaration order. `_end` goes before `_permit`, so a
+    // request that gets the freed permit finds the ID already reported.
+    _end: WaitEnd,
     /// Counts the request against its client's limit of waiting requests.
     _permit: WaitPermit,
-    _end: WaitEnd,
+}
+
+/// Closes the waiter before `_end` reports it, so the waiting list can remove
+/// it. Implementing `Drop` also keeps code from moving `receiver` out, which
+/// would leave the waiter open after the report.
+impl<T> Drop for Wait<T> {
+    fn drop(&mut self) {
+        self.receiver.close();
+    }
 }
 
 #[cfg(test)]
@@ -63,9 +72,11 @@ impl<T> Wait<T> {
 /// waiters.
 ///
 /// A wait can end without the waiting list's lock, for example when its client
-/// disconnects, so it can't remove its waiter itself. The list stays short:
-/// the waiting list empties it before it adds a waiter, so it holds at most
-/// one ID per wait that was open at that point.
+/// disconnects, so it can't remove its waiter itself. The waiting list empties
+/// the list before each capacity check and in each cleanup, so it holds at
+/// most one ID per request that was waiting at that point. That includes
+/// requests whose waiter already got its value but whose handler hasn't
+/// returned yet.
 ///
 /// Cloning gives another handle to the same list.
 #[derive(Clone, Default)]
@@ -343,13 +354,19 @@ impl WaitingList {
 
     /// Removes expired entries and the waiters that can no longer be served.
     ///
-    /// Drops the waiters of ended waits, the ACK waiters of the deleted
-    /// entries, and IDs left without waiters. Message waiters stay: they wait
-    /// for the next message, which can still arrive.
+    /// Drops closed waiters, the ACK waiters of the deleted entries, and IDs
+    /// left without waiters. Message waiters stay: they wait for the next
+    /// message, which can still arrive.
+    ///
+    /// Scans every waiting ID, not only the ones in `ended_waits`, so that a
+    /// closed waiter whose ID was never reported can't keep its slot for more
+    /// than one cleanup interval.
     ///
     /// Returns the number of expired entries deleted.
     pub fn remove_expired(&mut self) -> anyhow::Result<usize> {
-        self.remove_ended_waiters();
+        // The scan covers the reported IDs too.
+        self.ended_waits.take();
+        self.remove_closed_waiters();
         let expired_ids = self.repository.remove_expired()?;
         for id in &expired_ids {
             self.take_ack_waiters(id);
@@ -510,6 +527,15 @@ impl WaitingList {
             }
         }
     }
+
+    /// Removes closed waiters of every ID, and the IDs left without waiters.
+    /// Takes time in proportion to the size of the waiter map.
+    fn remove_closed_waiters(&mut self) {
+        self.waiters.retain(|_, waiters| {
+            waiters.remove_closed();
+            !waiters.is_empty()
+        });
+    }
 }
 
 #[cfg(test)]
@@ -547,13 +573,16 @@ mod tests {
         }
     }
 
-    /// Returns the receiver of a wait. Drops the rest of the wait, which frees
-    /// the client's permit at once.
-    fn pending<T>(delivery: Delivery<T>) -> oneshot::Receiver<T> {
+    fn pending<T>(delivery: Delivery<T>) -> Wait<T> {
         match delivery {
-            Delivery::Pending(wait) => wait.receiver,
+            Delivery::Pending(wait) => wait,
             Delivery::Ready(_) => panic!("expected to wait"),
         }
+    }
+
+    /// Waits for the value. The wait stays open until the value arrives.
+    async fn received<T>(mut wait: Wait<T>) -> Result<T, oneshot::error::RecvError> {
+        (&mut wait.receiver).await
     }
 
     fn ready<T>(delivery: Delivery<T>) -> T {
@@ -565,9 +594,9 @@ mod tests {
 
     /// Whether the channel closed without a value. Doesn't wait, so a test
     /// fails instead of hanging if the channel stays open.
-    fn is_closed<T>(mut receiver: oneshot::Receiver<T>) -> bool {
+    fn is_closed<T>(mut wait: Wait<T>) -> bool {
         matches!(
-            receiver.try_recv(),
+            wait.receiver.try_recv(),
             Err(oneshot::error::TryRecvError::Closed)
         )
     }
@@ -591,11 +620,11 @@ mod tests {
     #[tokio::test]
     async fn waiting_consumer_receives_next_message() {
         let mut list = list(10);
-        let receiver = pending(list.get_or_subscribe("id", alice()).unwrap());
+        let wait = pending(list.get_or_subscribe("id", alice()).unwrap());
 
         list.store("id", message("hello"), TTL, alice()).unwrap();
 
-        assert_eq!(receiver.await.unwrap(), message("hello"));
+        assert_eq!(received(wait).await.unwrap(), message("hello"));
     }
 
     #[test]
@@ -629,11 +658,11 @@ mod tests {
     async fn ack_notifies_ack_waiters() {
         let mut list = list(10);
         list.store("id", message("hello"), TTL, alice()).unwrap();
-        let receiver = pending(list.subscribe_ack("id", alice()).unwrap().unwrap());
+        let wait = pending(list.subscribe_ack("id", alice()).unwrap().unwrap());
 
         list.ack("id").unwrap();
 
-        assert!(receiver.await.is_ok());
+        assert!(received(wait).await.is_ok());
     }
 
     #[test]
@@ -651,11 +680,11 @@ mod tests {
     async fn new_message_drops_ack_waiters_of_the_replaced_one() {
         let mut list = list(10);
         list.store("id", message("first"), TTL, alice()).unwrap();
-        let receiver = pending(list.subscribe_ack("id", alice()).unwrap().unwrap());
+        let wait = pending(list.subscribe_ack("id", alice()).unwrap().unwrap());
 
         list.store("id", message("second"), TTL, alice()).unwrap();
 
-        assert!(is_closed(receiver));
+        assert!(is_closed(wait));
     }
 
     // ========== Full store ==========
@@ -665,13 +694,13 @@ mod tests {
         let mut list = WaitingList::new(test_repository(1), unlimited_clients(10));
         list.store("unacked", message("first"), TTL, alice())
             .unwrap();
-        let mut receiver = pending(list.get_or_subscribe("waiting", alice()).unwrap());
+        let mut waiting = pending(list.get_or_subscribe("waiting", alice()).unwrap());
 
         let result = list.store("waiting", message("second"), TTL, alice());
 
         assert!(matches!(result, Err(WaitingListError::StoreFull)));
         assert!(matches!(
-            receiver.try_recv(),
+            waiting.receiver.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
     }
@@ -688,12 +717,12 @@ mod tests {
             alice(),
         )
         .unwrap();
-        let receiver = pending(list.subscribe_ack("expires", alice()).unwrap().unwrap());
+        let wait = pending(list.subscribe_ack("expires", alice()).unwrap().unwrap());
         tokio::time::sleep(Duration::from_millis(150)).await;
 
         list.store("new", message("hello"), TTL, alice()).unwrap();
 
-        assert!(is_closed(receiver));
+        assert!(is_closed(wait));
     }
 
     // ========== Link: take_or_subscribe and store_and_subscribe_ack ==========
@@ -722,7 +751,7 @@ mod tests {
             .unwrap();
 
         ready(producer);
-        assert_eq!(consumer.await.unwrap(), message("hello"));
+        assert_eq!(received(consumer).await.unwrap(), message("hello"));
     }
 
     #[cfg(feature = "link-compat")]
@@ -733,7 +762,7 @@ mod tests {
         let mut list = list(10);
         let consumer = pending(list.take_or_subscribe("id", alice()).unwrap());
         list.store("id", message("first"), TTL, alice()).unwrap();
-        assert_eq!(consumer.await.unwrap(), message("first"));
+        assert_eq!(received(consumer).await.unwrap(), message("first"));
 
         let producer = list
             .store_and_subscribe_ack("id", message("second"), TTL, alice())
@@ -753,7 +782,7 @@ mod tests {
             .unwrap();
 
         pending(producer);
-        assert_eq!(consumer.await.unwrap(), message("hello"));
+        assert_eq!(received(consumer).await.unwrap(), message("hello"));
     }
 
     #[cfg(feature = "link-compat")]
@@ -779,7 +808,7 @@ mod tests {
         let result = list.store_and_subscribe_ack("id", message("hello"), TTL, alice());
 
         assert!(result.is_ok());
-        assert_eq!(consumer.await.unwrap(), message("hello"));
+        assert_eq!(received(consumer).await.unwrap(), message("hello"));
     }
 
     #[cfg(feature = "link-compat")]
@@ -787,15 +816,15 @@ mod tests {
     fn store_and_subscribe_ack_replaces_ack_waiters_at_per_id_limit() {
         let mut list = list(10);
         list.store("id", message("first"), TTL, alice()).unwrap();
-        let receivers: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
+        let waits: Vec<_> = (0..MAX_WAITERS_PER_ENTRY)
             .map(|_| pending(list.subscribe_ack("id", alice()).unwrap().unwrap()))
             .collect();
 
         let result = list.store_and_subscribe_ack("id", message("second"), TTL, alice());
 
         assert!(result.is_ok());
-        for receiver in receivers {
-            assert!(is_closed(receiver));
+        for wait in waits {
+            assert!(is_closed(wait));
         }
     }
 
@@ -891,6 +920,39 @@ mod tests {
         let mut list = WaitingList::new(test_repository(100), limits);
         for id in ["a", "b", "c", "d"] {
             drop(list.get_or_subscribe(id, alice()).unwrap());
+        }
+
+        assert!(list.get_or_subscribe("new", bob()).is_ok());
+    }
+
+    #[test]
+    fn ended_ack_waits_free_their_ids() {
+        let limits = WaitingLimits {
+            max_ids: 1,
+            max_requests_per_client: 1,
+        };
+        let mut list = WaitingList::new(test_repository(100), limits);
+        for id in ["a", "b"] {
+            list.store(id, message("hello"), TTL, alice()).unwrap();
+            drop(list.subscribe_ack(id, alice()).unwrap());
+        }
+
+        assert!(list.get_or_subscribe("new", bob()).is_ok());
+    }
+
+    #[cfg(feature = "link-compat")]
+    #[test]
+    fn ended_link_producer_waits_free_their_ids() {
+        let limits = WaitingLimits {
+            max_ids: 1,
+            max_requests_per_client: 1,
+        };
+        let mut list = WaitingList::new(test_repository(100), limits);
+        for id in ["a", "b"] {
+            drop(
+                list.store_and_subscribe_ack(id, message("hello"), TTL, alice())
+                    .unwrap(),
+            );
         }
 
         assert!(list.get_or_subscribe("new", bob()).is_ok());
@@ -1024,12 +1086,12 @@ mod tests {
     async fn remove_expired_keeps_waiters_without_entry() {
         // Regression test: consumer arrives before producer, cleanup must not drop the waiter
         let mut list = list(10);
-        let receiver = pending(list.get_or_subscribe("id", alice()).unwrap());
+        let wait = pending(list.get_or_subscribe("id", alice()).unwrap());
 
         list.remove_expired().unwrap();
         list.store("id", message("delayed"), TTL, alice()).unwrap();
 
-        assert_eq!(receiver.await.unwrap(), message("delayed"));
+        assert_eq!(received(wait).await.unwrap(), message("delayed"));
     }
 
     #[tokio::test]
@@ -1051,7 +1113,7 @@ mod tests {
 
         assert!(is_closed(expiring));
         list.ack("stays").unwrap();
-        assert!(staying.await.is_ok());
+        assert!(received(staying).await.is_ok());
     }
 
     #[tokio::test]
@@ -1062,24 +1124,44 @@ mod tests {
         list.store("id", message("first"), Duration::from_millis(200), alice())
             .unwrap();
         list.ack("id").unwrap();
-        let receiver = pending(list.get_or_subscribe("id", alice()).unwrap());
+        let wait = pending(list.get_or_subscribe("id", alice()).unwrap());
         tokio::time::sleep(Duration::from_millis(250)).await;
 
         assert_eq!(list.remove_expired().unwrap(), 1);
         list.store("id", message("second"), TTL, alice()).unwrap();
 
-        assert_eq!(receiver.await.unwrap(), message("second"));
+        assert_eq!(received(wait).await.unwrap(), message("second"));
     }
 
     #[test]
-    fn remove_expired_frees_ids_of_ended_waits() {
-        // Without new waits, nothing else empties the list of ended waits.
+    fn remove_expired_empties_the_ended_waits() {
+        // Without new waits, nothing else empties the list.
         let mut list = list(10);
         drop(list.get_or_subscribe("a", alice()).unwrap());
 
         list.remove_expired().unwrap();
 
-        assert!(list.waiters.is_empty());
         assert!(list.ended_waits.take().is_empty());
+    }
+
+    #[test]
+    fn remove_expired_frees_ids_of_unreported_closed_waiters() {
+        // Safety net in case a closed waiter's ID never reaches `ended_waits`.
+        let mut list = list(1);
+        let (sender, receiver) = oneshot::channel();
+        drop(receiver);
+        list.waiters
+            .entry("unreported".to_string())
+            .or_default()
+            .messages
+            .add(MessageWaiter {
+                sender,
+                acks_on_delivery: false,
+            });
+        assert!(is_limit(list.get_or_subscribe("new", alice())));
+
+        list.remove_expired().unwrap();
+
+        assert!(list.get_or_subscribe("new", alice()).is_ok());
     }
 }
