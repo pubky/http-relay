@@ -6,6 +6,16 @@ All notable changes are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+- With `--persist-db`, writes no longer wait for a disk sync on every commit
+  (`PRAGMA synchronous=NORMAL` in WAL mode). All requests share one database
+  lock, so slow syncs delayed every client. A power loss or OS crash can now
+  undo the last writes; the database stays consistent.
+
+### Changed
+- The Nginx example in [DEPLOY.md](DEPLOY.md#run-behind-nginx) now limits
+  request rates per client address with `limit_req`.
+
 ## [0.8.0] - 2026-11-11
 
 ### Added
