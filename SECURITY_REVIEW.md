@@ -226,7 +226,7 @@ attacker could use its description against deployed relays.
 The [Security workflow](.github/workflows/security.yml) runs `cargo deny check`:
 
 - On pull requests and pushes to `main` that change `Cargo.toml`, `Cargo.lock`,
-  or `deny.toml`
+  `deny.toml`, or the workflow itself
 - Every Monday at 06:00 UTC, to catch advisories published since the last change
 - On demand from the Actions tab (**Run workflow**)
 
@@ -234,4 +234,4 @@ The workflow is separate from CI, so a newly published advisory doesn't block
 unrelated pull requests.
 
 The library and the binary declare `#![forbid(unsafe_code)]`, so the compiler
-rejects any `unsafe` code in http-relay itself. Dependencies aren't affected.Good
+rejects any `unsafe` code in http-relay itself. Dependencies aren't affected.
