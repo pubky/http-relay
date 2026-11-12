@@ -1,5 +1,7 @@
 //! HTTP Relay server executable.
 
+#![forbid(unsafe_code)]
+
 #[cfg(feature = "persist")]
 use std::path::PathBuf;
 use std::{net::IpAddr, num::NonZeroUsize, time::Duration};

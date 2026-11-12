@@ -9,6 +9,7 @@
 //! - `link-compat` (default): Legacy `/link/{id}` endpoints (deprecated).
 //! - `cli` (default): The `http-relay` binary.
 
+#![forbid(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]
 
