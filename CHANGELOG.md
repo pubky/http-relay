@@ -6,6 +6,8 @@ All notable changes are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-12
+
 ### Changed
 - The Nginx example in [DEPLOY.md](DEPLOY.md#run-behind-nginx) now limits
   request rates per client address with `limit_req`, sized for 100 active
@@ -116,7 +118,8 @@ All notable changes are documented here. The format is based on
   long-poll with `GET` and ACK with `DELETE`; producers check the ACK with
   `/ack` or wait for it with `/await`.
 
-[Unreleased]: https://github.com/pubky/http-relay/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/pubky/http-relay/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/pubky/http-relay/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/pubky/http-relay/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/pubky/http-relay/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/pubky/http-relay/releases/tag/v0.6.0

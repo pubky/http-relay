@@ -31,7 +31,7 @@ info:
     messages from this client` (429), `Too many waiting requests from this client` (429),
     `Too many concurrent requests` (503),
     `Server at capacity` (503) or `Storage error` (500).
-  version: 0.8.0
+  version: 0.8.1
   license:
     name: MIT
     url: https://opensource.org/licenses/MIT
