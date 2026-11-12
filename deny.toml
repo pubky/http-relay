@@ -11,7 +11,9 @@ unmaintained = "all"
 yanked = "deny"
 # Every ignored advisory needs a reason, for example:
 # { id = "RUSTSEC-0000-0000", reason = "Only affects X, which we don't use" },
-ignore = []
+ignore = [
+    { id = "RUSTSEC-2026-0441", reason = "pin-utils is unmaintained but has no fix; it comes in through hyper. Remove once hyper drops it." },
+]
 
 [licenses]
 # Permissive licenses compatible with distributing an MIT crate.
@@ -24,6 +26,7 @@ allow = [
     "BSL-1.0",
     "MIT",
     "Unicode-3.0",
+    "Zlib",
 ]
 confidence-threshold = 0.9
 
